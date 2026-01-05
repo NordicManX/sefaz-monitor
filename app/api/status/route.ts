@@ -4,53 +4,50 @@ import * as cheerio from 'cheerio';
 import https from 'https';
 import { supabase } from '@/lib/supabase';
 
-// 1. Agente HTTPS (Mantido)
+// 1. Agente HTTPS
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false,
     minVersion: 'TLSv1',
     ciphers: 'DEFAULT@SECLEVEL=1'
 });
 
-// 2. Endpoints Críticos
+// 2. Endpoints Críticos (PR NFCe)
 const CRITICAL_ENDPOINTS: Record<string, string> = {
     'PR_NFCe': 'https://nfce.sefa.pr.gov.br/nfce/NFeAutorizacao4',
 };
 
-// --- AJUSTE DE SENSIBILIDADE AQUI ---
+// --- CHECK RIGOROSO ---
 async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'instavel'> {
     const start = Date.now();
     try {
-        console.log(`⚡ Testando conexão real: ${url}`);
+        console.log(`⚡ Testando conexão real (Rigoroso): ${url}`);
 
-        // Timeout aumentado para 15s (para pegar lentidão extrema sem dar erro de cara)
+        // Timeout de 10s
         const response = await axios.get(url, {
             httpsAgent,
-            timeout: 15000, // Aumentei de 5000 para 15000
+            timeout: 10000,
             validateStatus: (status) => {
-                // 403 = WAF/Bloqueio -> Offline
-                // 200, 405, 500 -> Servidor respondeu (Online)
-                return status === 200 || status === 405 || status === 500;
+                // AQUI ESTÁ A MUDANÇA:
+                // Aceitamos APENAS 200 (Página OK) ou 405 (SOAP Get).
+                // REJEITAMOS 500 (Erro Interno), 503 (Indisponível), 403 (Bloqueio).
+                // Se não for 200 ou 405, o Axios vai jogar pro catch (Offline).
+                return status === 200 || status === 405;
             }
         });
 
         const latency = Date.now() - start;
         console.log(`✅ Sucesso PR (${latency}ms) - Status: ${response.status}`);
 
-        // REGRA MAIS RIGOROSA:
-        // Antes era > 2000ms. Agora > 800ms já considera "Instável" (Laranja).
-        // Isso vai fazer seu monitor "reclamar" mais cedo, igual ao do vizinho.
+        // Se a latência for maior que 800ms, já marcamos como instável
         return latency > 800 ? 'instavel' : 'online';
 
     } catch (error: any) {
         const status = error.response?.status;
         const code = error.code;
 
-        console.log(`❌ FALHA REAL NO PR: ${code || status}`);
+        console.log(`❌ FALHA REAL NO PR: Status ${status} | Code ${code}`);
 
-        if (status === 403 || code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
-            return 'offline';
-        }
-
+        // Qualquer erro de conexão, timeout, ou status 500/403/503 vira OFFLINE
         return 'offline';
     }
 }
@@ -122,14 +119,16 @@ export async function GET() {
             if (CRITICAL_ENDPOINTS[endpointKey]) {
                 const checkTask = checkRealEndpoint(CRITICAL_ENDPOINTS[endpointKey])
                     .then((realStatus) => {
-                        // AGORA SOBRESCREVEMOS SEMPRE QUE NÃO FOR 'ONLINE'
-                        // E como baixamos a régua para 800ms, vai dar 'instavel' muito mais fácil.
+                        // Se o teste rigoroso falhar, derruba o status visualmente
                         if (realStatus !== 'online') {
                             console.log(`⚠️ OVERRIDE: ${estado} NFCe marcado como ${realStatus}`);
                             nfceData.autorizacao = realStatus;
                             nfceData.status_servico = realStatus;
+
+                            // Se for offline, derruba tudo
                             if (realStatus === 'offline') {
                                 nfceData.retorno_autorizacao = 'offline';
+                                nfceData.consulta = 'offline';
                             }
                         }
                     });
