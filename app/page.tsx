@@ -258,7 +258,7 @@ export default function Home() {
 
       <footer className="w-full max-w-5xl mt-12 pt-8 pb-4 border-t border-slate-800/50 flex flex-col items-center gap-3">
         <div className="text-xs text-slate-500 font-mono tracking-widest uppercase">
-          Desenvolvido por <span className="text-indigo-400 font-bold">Nordic-Tech</span> & <span className="text-rose-500 font-bold">Nemesis Team</span>
+          Desenvolvido por <span className="text-indigo-400 font-bold">Nordic-Tech COM MUITO CAFÉ ☕!!</span>
         </div>
         <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900/50 border border-slate-800 text-[10px] text-slate-600 font-mono">
           <Eye className="w-3 h-3 text-slate-500" />
