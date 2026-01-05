@@ -111,7 +111,7 @@ export default function Home() {
     fetchHistory(selectedUF, selectedModel);
 
     // Tenta atualizar a cada 60s
-    const interval = setInterval(() => { updateRemoteStatus(); }, 60000);
+    const interval = setInterval(() => { updateRemoteStatus(); }, 15000);
 
     // Realtime Listener
     const channel = supabase
