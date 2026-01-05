@@ -9,9 +9,16 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.89.0",
+    "axios": "^1.13.2",
+    "axios-cookiejar-support": "^6.0.5",
+    "cheerio": "^1.1.2",
+    "got": "^14.6.6",
+    "lucide-react": "^0.562.0",
     "next": "16.1.1",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "tough-cookie": "^6.0.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
