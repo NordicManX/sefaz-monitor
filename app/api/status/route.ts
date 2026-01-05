@@ -16,21 +16,19 @@ const CRITICAL_ENDPOINTS: Record<string, string> = {
     'PR_NFCe': 'https://nfce.sefa.pr.gov.br/nfce/NFeAutorizacao4',
 };
 
-// --- A MUDANÇA ESTÁ AQUI NA FUNÇÃO DE CHECK ---
+// --- AJUSTE DE SENSIBILIDADE AQUI ---
 async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'instavel'> {
     const start = Date.now();
     try {
         console.log(`⚡ Testando conexão real: ${url}`);
 
-        // Timeout de 5s
+        // Timeout aumentado para 15s (para pegar lentidão extrema sem dar erro de cara)
         const response = await axios.get(url, {
             httpsAgent,
-            timeout: 5000,
-            // Agora NÃO aceitamos qualquer status.
-            // 403 (Forbidden) = Bloqueio de WAF/GeoIP -> Consideramos OFFLINE
+            timeout: 15000, // Aumentei de 5000 para 15000
             validateStatus: (status) => {
-                // Aceita 200 (OK), 405 (Method Not Allowed - Comum em SOAP GET), 500 (Erro Interno do Server)
-                // Rejeita 403 (Forbidden) e 404 (Not Found)
+                // 403 = WAF/Bloqueio -> Offline
+                // 200, 405, 500 -> Servidor respondeu (Online)
                 return status === 200 || status === 405 || status === 500;
             }
         });
@@ -38,17 +36,17 @@ async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'i
         const latency = Date.now() - start;
         console.log(`✅ Sucesso PR (${latency}ms) - Status: ${response.status}`);
 
-        return latency > 2000 ? 'instavel' : 'online';
+        // REGRA MAIS RIGOROSA:
+        // Antes era > 2000ms. Agora > 800ms já considera "Instável" (Laranja).
+        // Isso vai fazer seu monitor "reclamar" mais cedo, igual ao do vizinho.
+        return latency > 800 ? 'instavel' : 'online';
 
     } catch (error: any) {
-        // Se der erro de status (403) cai aqui agora!
         const status = error.response?.status;
         const code = error.code;
 
         console.log(`❌ FALHA REAL NO PR: ${code || status}`);
 
-        // 403 = Bloqueado pelo Firewall da SEFAZ (Vercel IP)
-        // ECONNABORTED = Timeout real (Servidor lento)
         if (status === 403 || code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
             return 'offline';
         }
@@ -124,6 +122,8 @@ export async function GET() {
             if (CRITICAL_ENDPOINTS[endpointKey]) {
                 const checkTask = checkRealEndpoint(CRITICAL_ENDPOINTS[endpointKey])
                     .then((realStatus) => {
+                        // AGORA SOBRESCREVEMOS SEMPRE QUE NÃO FOR 'ONLINE'
+                        // E como baixamos a régua para 800ms, vai dar 'instavel' muito mais fácil.
                         if (realStatus !== 'online') {
                             console.log(`⚠️ OVERRIDE: ${estado} NFCe marcado como ${realStatus}`);
                             nfceData.autorizacao = realStatus;
