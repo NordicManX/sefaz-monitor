@@ -4,7 +4,9 @@ import * as cheerio from 'cheerio';
 import https from 'https';
 import { supabase } from '@/lib/supabase';
 
-export const dynamic = 'force-dynamic'; // <--- OBRIGA O NEXT A NÃO FAZER CACHE
+// 1. FORÇA O NEXT.JS A NÃO FAZER CACHE (ESSENCIAL PARA VERCEL)
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false,
@@ -18,36 +20,53 @@ const CRITICAL_ENDPOINTS: Record<string, string> = {
 
 async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'instavel'> {
     const start = Date.now();
-    try {
-        // --- TRUQUE DO CACHE BUSTER ---
-        // Adiciona ?t=123456 na URL para evitar que o WAF/CDN entregue versão velha
-        const targetUrl = `${url}?t=${Date.now()}`;
 
-        console.log(`⚡ Testando (Sem Cache): ${targetUrl}`);
+    // 2. TÉCNICA DE CACHE BUSTING (ADICIONA NÚMERO ALEATÓRIO NA URL)
+    // Isso força a SEFAZ e a Vercel a tratarem como uma requisição nova
+    const targetUrl = `${url}?cache_buster=${Date.now()}`;
+
+    try {
+        console.log(`⚡ Testando (Realtime): ${targetUrl}`);
 
         const response = await axios.get(targetUrl, {
             httpsAgent,
-            timeout: 15000, // 15s de tolerância
+            timeout: 15000, // 15 segundos (igual ao log de timeout do vizinho)
             headers: {
+                // Headers para gritar "NÃO QUERO CACHE!"
                 'Cache-Control': 'no-cache, no-store, must-revalidate',
                 'Pragma': 'no-cache',
                 'Expires': '0'
             },
             validateStatus: (status) => {
-                // Aceita apenas 200 e 405. 
-                // Recusa 500, 503, 403.
+                // SÓ ACEITA SUCESSO. 
+                // Se der 500 (Erro 999), 502, 503 ou 403, joga pro catch.
                 return status === 200 || status === 405;
             }
         });
 
         const latency = Date.now() - start;
-        console.log(`✅ PR Respondeu em ${latency}ms`);
+        console.log(`✅ PR Respondeu em ${latency}ms - Status: ${response.status}`);
 
-        // Se demorar mais de 800ms, é INSTÁVEL (Laranja)
+        // Se demorou mais de 800ms, já marca como instável (Laranja)
         return latency > 800 ? 'instavel' : 'online';
 
     } catch (error: any) {
-        console.log(`❌ FALHA REAL: ${error.code || error.response?.status}`);
+        // --- ANÁLISE DOS ERROS DO VIZINHO ---
+        const code = error.code;
+        const status = error.response?.status;
+
+        console.log(`❌ FALHA REAL: ${code || status} - ${error.message}`);
+
+        // Mapeamento dos erros que você mandou:
+        // "Operation timed out" -> ECONNABORTED
+        // "Connection could not be established" -> ECONNREFUSED / ECONNRESET
+        // "999 Erro nao catalogado" -> Status 500, 502, 503
+
+        if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') return 'offline'; // Vermelho (Timeout)
+        if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return 'offline'; // Vermelho (Falha Conexão)
+        if (status >= 500) return 'offline'; // Vermelho (Erro Interno 999)
+        if (status === 403) return 'offline'; // Vermelho (Bloqueio WAF)
+
         return 'offline';
     }
 }
@@ -55,29 +74,26 @@ async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'i
 export async function GET() {
     try {
         const targetUrl = "https://www.nfe.fazenda.gov.br/portal/disponibilidade.aspx";
+        // User Agent aleatório para evitar bloqueio do portal nacional
         const randomVer = Math.floor(Math.random() * 20) + 110;
         const userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${randomVer}.0.0.0 Safari/537.36`;
 
+        // Busca Portal Nacional (Visão Macro)
         const response1 = await axios.get(targetUrl, {
             httpsAgent, timeout: 15000, maxRedirects: 0,
             validateStatus: (s) => s >= 200 && s < 400,
-            headers: {
-                'User-Agent': userAgent,
-                'Cache-Control': 'no-cache' // Header anti-cache
-            }
+            headers: { 'User-Agent': userAgent, 'Cache-Control': 'no-cache' }
         });
 
         let html = response1.data;
-        let finalResponse = response1;
-
+        // Lógica de Redirect mantida...
         if (response1.status === 302 || response1.status === 301) {
-            const cookies = response1.headers['set-cookie'];
             const redirectLocation = response1.headers.location;
             if (redirectLocation) {
                 const nextUrl = redirectLocation.startsWith('http') ? redirectLocation : `https://www.nfe.fazenda.gov.br${redirectLocation}`;
-                finalResponse = await axios.get(nextUrl, {
+                const finalResponse = await axios.get(nextUrl, {
                     httpsAgent,
-                    headers: { 'Cookie': cookies ? cookies.join('; ') : '', 'User-Agent': userAgent }
+                    headers: { 'Cookie': response1.headers['set-cookie']?.join('; '), 'User-Agent': userAgent }
                 });
                 html = finalResponse.data;
             }
@@ -90,10 +106,10 @@ export async function GET() {
         $('table.tabelaListagemDados tr').each((i, row) => {
             const cols = $(row).find('td');
             if (cols.length < 6) return;
+
             const estado = cols.eq(0).text().trim();
             if (!estado || estado.length !== 2) return;
 
-            // ... Lógica de extração das cores mantida ...
             const getStatusColor = (tdIndex: number) => {
                 const img = cols.eq(tdIndex).find('img').attr('src');
                 if (!img) return 'unknown';
@@ -117,13 +133,17 @@ export async function GET() {
             const nfceData = { ...baseData, modelo: 'NFCe' };
             const endpointKey = `${estado}_NFCe`;
 
+            // Se tiver endpoint crítico mapeado, faz o teste REAL
             if (CRITICAL_ENDPOINTS[endpointKey]) {
                 const checkTask = checkRealEndpoint(CRITICAL_ENDPOINTS[endpointKey])
                     .then((realStatus) => {
+                        // Se não for 'online' perfeito, sobrescreve o Portal Nacional
                         if (realStatus !== 'online') {
                             console.log(`⚠️ OVERRIDE: ${estado} NFCe -> ${realStatus}`);
                             nfceData.autorizacao = realStatus;
                             nfceData.status_servico = realStatus;
+
+                            // Se caiu autorização, derruba retorno e consulta também
                             if (realStatus === 'offline') {
                                 nfceData.retorno_autorizacao = 'offline';
                                 nfceData.consulta = 'offline';
@@ -132,6 +152,7 @@ export async function GET() {
                     });
                 verificationQueue.push(checkTask);
             }
+
             results.push(nfceData);
         });
 
@@ -141,7 +162,7 @@ export async function GET() {
 
         await supabase.from('sefaz_logs').insert(results);
 
-        // Retorna com headers que proíbem cache no navegador
+        // Retorna com headers anti-cache para o navegador também
         return NextResponse.json(results, {
             headers: {
                 'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
@@ -151,7 +172,7 @@ export async function GET() {
         });
 
     } catch (error: any) {
-        console.error("ERRO:", error.message);
+        console.error("ERRO GERAL:", error.message);
         return NextResponse.json({ error: "Falha técnica" }, { status: 500 });
     }
 }
