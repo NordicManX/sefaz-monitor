@@ -2,7 +2,7 @@
 
 import { supabase } from '@/lib/supabase';
 import { useState, useEffect } from 'react';
-import { ChevronDown, Wifi, AlertTriangle, Zap, CheckCircle2, XCircle, FileText, ShoppingCart, Eye } from 'lucide-react';
+import { ChevronDown, Wifi, AlertTriangle, Zap, CheckCircle2, XCircle, FileText, ShoppingCart, Eye, RefreshCw, Clock } from 'lucide-react';
 
 type StateStatus = {
   estado: string;
@@ -33,30 +33,43 @@ export default function Home() {
   const [currentData, setCurrentData] = useState<StateStatus | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-  const [lastUpdated, setLastUpdated] = useState<string>('');
-
-  // Estado para o contador de visitas
   const [visitCount, setVisitCount] = useState<number>(0);
 
-  // Busca o contador de visitas 
+  // Controle de "Dados Velhos"
+  const [isStale, setIsStale] = useState(false);
+  const [minutesAgo, setMinutesAgo] = useState(0);
+
+  // Busca visitas
   useEffect(() => {
-    const registerVisit = async () => {
-      try {
-        const res = await fetch('/api/visit', { cache: 'no-store' });
-        const json = await res.json();
-        if (json.count) setVisitCount(json.count);
-      } catch (e) {
-        console.error("Erro ao contar visita", e);
-      }
-    };
-    registerVisit();
+    fetch('/api/visit', { cache: 'no-store' })
+      .then(res => res.json())
+      .then(json => json.count && setVisitCount(json.count))
+      .catch(console.error);
   }, []);
+
+  // Verifica se os dados estão velhos (mais de 5 min)
+  useEffect(() => {
+    if (!currentData?.created_at) return;
+
+    const checkStale = () => {
+      const lastDate = new Date(currentData.created_at!);
+      const now = new Date();
+      const diffMs = now.getTime() - lastDate.getTime();
+      const diffMins = Math.floor(diffMs / 60000);
+
+      setMinutesAgo(diffMins);
+      // Se faz mais de 5 minutos que não atualiza, considera obsoleto
+      setIsStale(diffMins >= 5);
+    };
+
+    checkStale();
+    const timer = setInterval(checkStale, 30000); // Re-checa a cada 30s
+    return () => clearInterval(timer);
+  }, [currentData]);
 
   // Busca Histórico
   const fetchHistory = async (uf: string, modelo: string) => {
-    if (!currentData) setLoading(true);
-
+    setLoading(true);
     try {
       const res = await fetch(`/api/history?uf=${uf}&modelo=${modelo}`, { cache: 'no-store' });
       const json = await res.json();
@@ -72,31 +85,35 @@ export default function Home() {
         }));
 
         setHistory(formattedHistory);
-        setLastUpdated(new Date().toLocaleTimeString('pt-BR'));
-        setError(false);
       } else {
+        // Se não tem histórico, tenta forçar update
         updateRemoteStatus();
       }
     } catch (err) {
       console.error(err);
-      setError(true);
     } finally {
       setLoading(false);
     }
   };
 
   const updateRemoteStatus = async () => {
-    try { await fetch('/api/status', { cache: 'no-store' }); } catch (err) { console.error(err); }
+    try {
+      console.log("Forçando atualização remota...");
+      await fetch('/api/status', { cache: 'no-store' });
+    } catch (err) {
+      console.error("Erro ao atualizar status:", err);
+    }
   };
 
-  // Efeito Principal (Monitoramento)
+  // Efeito Principal
   useEffect(() => {
     setHistory([]);
-    setLoading(true);
     fetchHistory(selectedUF, selectedModel);
 
+    // Tenta atualizar a cada 60s
     const interval = setInterval(() => { updateRemoteStatus(); }, 60000);
 
+    // Realtime Listener
     const channel = supabase
       .channel('sefaz-realtime-model')
       .on(
@@ -111,8 +128,12 @@ export default function Home() {
           const newLog = payload.new as StateStatus;
 
           if (newLog.modelo === selectedModel) {
+            console.log("⚡ Realtime Update recebido!");
             setCurrentData(newLog);
-            setLastUpdated(new Date().toLocaleTimeString('pt-BR'));
+
+            // Reseta status de 'obsoleto' pois acabou de chegar dado novo
+            setIsStale(false);
+            setMinutesAgo(0);
 
             setHistory((prev) => {
               const newPoint = {
@@ -136,15 +157,16 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-[#0B0F19] text-slate-300 font-sans p-4 md:p-8 flex flex-col items-center">
 
-      <header className="w-full max-w-5xl flex flex-col md:flex-row justify-between items-center mb-8 gap-6 border-b border-slate-800/60 pb-6">
+      <header className="w-full max-w-5xl flex flex-col md:flex-row justify-between items-center mb-6 gap-6 border-b border-slate-800/60 pb-6">
         <div>
           <h1 className="text-3xl font-bold text-white tracking-tight flex items-center gap-2">
             Monitor SEFAZ <span className="text-indigo-500">{selectedUF}</span>
           </h1>
           <div className="flex items-center gap-4 mt-2">
-            <p className="text-xs text-slate-500 flex items-center gap-1">
-              <Wifi className="w-3 h-3 text-emerald-500" /> Online
-            </p>
+            <div className={`flex items-center gap-1 text-xs ${isStale ? 'text-amber-500 font-bold' : 'text-emerald-500'}`}>
+              {isStale ? <AlertTriangle className="w-3 h-3" /> : <Wifi className="w-3 h-3" />}
+              {isStale ? 'Conexão Instável / Dados Antigos' : 'Sistema Online'}
+            </div>
             <p className="text-xs text-slate-500 flex items-center gap-1">
               <Zap className="w-3 h-3 text-amber-400 fill-amber-400" /> Realtime
             </p>
@@ -182,22 +204,34 @@ export default function Home() {
         </div>
       </header>
 
+      {/* ALERTA DE DADOS DESATUALIZADOS */}
+      {isStale && (
+        <div className="w-full max-w-5xl mb-6 bg-amber-500/10 border border-amber-500/30 p-4 rounded-xl flex items-center gap-3 text-amber-200 animate-pulse">
+          <AlertTriangle className="w-6 h-6 text-amber-500" />
+          <div>
+            <p className="font-bold text-sm">Atenção: Os dados exibidos podem estar desatualizados.</p>
+            <p className="text-xs opacity-80">Última atualização recebida da SEFAZ foi há {minutesAgo} minutos. Possível instabilidade na coleta.</p>
+          </div>
+          <button
+            onClick={() => updateRemoteStatus()}
+            className="ml-auto bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 px-3 py-1 rounded text-xs font-bold transition-colors"
+          >
+            Tentar Forçar Atualização
+          </button>
+        </div>
+      )}
+
       <div className="w-full max-w-5xl space-y-8 flex-1">
         {loading && !currentData ? (
           <div className="h-64 rounded-2xl bg-slate-800/30 animate-pulse border border-slate-700/30"></div>
-        ) : error ? (
-          <div className="p-8 border border-rose-500/20 bg-rose-500/5 rounded-xl text-rose-300 text-center">
-            <AlertTriangle className="w-10 h-10 mx-auto mb-3 opacity-50" />
-            Falha de Conexão ou Dados Inexistentes
-          </div>
         ) : currentData && (
           <>
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
-              <StatusBadge label="Autorização" status={currentData.autorizacao} />
-              <StatusBadge label="Retorno" status={currentData.retorno_autorizacao} />
-              <StatusBadge label="Inutilização" status={currentData.inutilizacao} />
-              <StatusBadge label="Consulta" status={currentData.consulta} />
-              <StatusBadge label="Serviço" status={currentData.status_servico} />
+              <StatusBadge label="Autorização" status={currentData.autorizacao} isStale={isStale} />
+              <StatusBadge label="Retorno" status={currentData.retorno_autorizacao} isStale={isStale} />
+              <StatusBadge label="Inutilização" status={currentData.inutilizacao} isStale={isStale} />
+              <StatusBadge label="Consulta" status={currentData.consulta} isStale={isStale} />
+              <StatusBadge label="Serviço" status={currentData.status_servico} isStale={isStale} />
             </div>
 
             <div className="space-y-6">
@@ -217,14 +251,14 @@ export default function Home() {
         )}
       </div>
 
-      <div className="fixed bottom-4 right-4 text-[10px] text-slate-600 font-mono bg-slate-900 px-3 py-1.5 rounded border border-slate-800">
-        Atualizado: {lastUpdated}
+      <div className="fixed bottom-4 right-4 text-[10px] text-slate-600 font-mono bg-slate-900 px-3 py-1.5 rounded border border-slate-800 flex items-center gap-2">
+        <Clock className="w-3 h-3" />
+        Último Sync: {currentData?.created_at ? new Date(currentData.created_at).toLocaleTimeString() : '--:--'}
       </div>
-
 
       <footer className="w-full max-w-5xl mt-12 pt-8 pb-4 border-t border-slate-800/50 flex flex-col items-center gap-3">
         <div className="text-xs text-slate-500 font-mono tracking-widest uppercase">
-          Desenvolvido por <span className="text-indigo-400 font-bold">Nordic-Tech e, com muito CAFÉ ☕!!!</span>
+          Desenvolvido por <span className="text-indigo-400 font-bold">Nordic-Tech</span> & <span className="text-rose-500 font-bold">Nemesis Team</span>
         </div>
         <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900/50 border border-slate-800 text-[10px] text-slate-600 font-mono">
           <Eye className="w-3 h-3 text-slate-500" />
@@ -235,15 +269,25 @@ export default function Home() {
   );
 }
 
-// Componentes Visuais 
+// --- Componentes Visuais ---
 
-function StatusBadge({ label, status }: { label: string, status: string }) {
+function StatusBadge({ label, status, isStale }: { label: string, status: string, isStale: boolean }) {
+  // Se estiver obsoleto (stale), força visual cinza/apagado
+  if (isStale) {
+    return (
+      <div className="flex items-center justify-between p-3 rounded-lg border bg-slate-800/20 border-slate-700/50 opacity-60 grayscale">
+        <span className="text-xs font-medium text-slate-500">{label}</span>
+        <AlertTriangle className="w-4 h-4 text-slate-500" />
+      </div>
+    );
+  }
+
   const isOnline = status === 'online';
   const isUnstable = status === 'instavel';
 
   return (
     <div className={`
-      flex items-center justify-between p-3 rounded-lg border 
+      flex items-center justify-between p-3 rounded-lg border transition-all duration-500
       ${isOnline ? 'bg-emerald-500/5 border-emerald-500/20' : isUnstable ? 'bg-amber-400/5 border-amber-400/20' : 'bg-rose-500/5 border-rose-500/20'}
     `}>
       <span className="text-xs font-medium text-slate-400">{label}</span>
