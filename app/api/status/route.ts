@@ -4,7 +4,7 @@ import * as cheerio from 'cheerio';
 import https from 'https';
 import { supabase } from '@/lib/supabase';
 
-// 1. FORÇA O NEXT.JS A NÃO FAZER CACHE
+// 1. FORÇA SEM CACHE
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
@@ -15,52 +15,58 @@ const httpsAgent = new https.Agent({
 });
 
 const CRITICAL_ENDPOINTS: Record<string, string> = {
-    'PR_NFCe': 'https://nfce.sefa.pr.gov.br/nfce/NFeAutorizacao4',
+    // MUDANÇA 1: Miramos no ?wsdl para forçar o servidor a trabalhar
+    'PR_NFCe': 'https://nfce.sefa.pr.gov.br/nfce/NFeAutorizacao4?wsdl',
 };
 
 async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'instavel'> {
     const start = Date.now();
-    const targetUrl = `${url}?cb=${Date.now()}`; // Cache Buster
+
+    // Adiciona timestamp apenas se não tiver query string, para não quebrar o ?wsdl
+    const separator = url.includes('?') ? '&' : '?';
+    const targetUrl = `${url}${separator}cb=${Date.now()}`;
 
     try {
-        console.log(`⚡ Testando (Content Check): ${targetUrl}`);
+        console.log(`⚡ Testando (WSDL/XML Check): ${targetUrl}`);
 
         const response = await axios.get(targetUrl, {
             httpsAgent,
             timeout: 15000,
-            responseType: 'text', // Força receber como texto para ler o corpo
+            responseType: 'text', // Lemos como texto para inspecionar
             headers: {
-                'Cache-Control': 'no-cache, no-store, must-revalidate',
-                'Pragma': 'no-cache',
-                'User-Agent': 'Mozilla/5.0' // Tenta se passar por browser
+                'Cache-Control': 'no-cache, no-store',
+                'User-Agent': 'Mozilla/5.0 (Compatible; Monitor/1.0)'
             },
-            validateStatus: (status) => status === 200 || status === 405
+            validateStatus: (status) => status === 200 // Só aceita 200 OK
         });
 
         const latency = Date.now() - start;
+        const contentType = response.headers['content-type'] || '';
         const body = response.data || '';
 
-        // --- AQUI ESTÁ A MÁGICA: DETECTOR DE PÁGINA DE ERRO DISFARÇADA ---
-        // Se a resposta tiver tags HTML de página comum, é bloqueio/erro disfarçado de 200.
-        // O serviço real da SEFAZ retorna XML (SOAP) ou vazio, nunca uma página HTML completa.
-        if (typeof body === 'string' && (body.includes('<!DOCTYPE html>') || body.includes('<html') || body.includes('<body'))) {
-            console.log(`❌ FALHA: Recebido HTML (Bloqueio WAF) em vez de XML.`);
+        // --- MUDANÇA 2: O GRANDE FILTRO ---
+
+        // Regra A: Se o servidor devolver HTML, é erro disfarçado (Página de Manutenção/Bloqueio)
+        if (contentType.includes('text/html') || body.includes('<!DOCTYPE html>') || body.includes('<html')) {
+            console.log(`❌ FALHA: Recebido HTML em vez de XML (Content-Type: ${contentType})`);
             return 'offline';
         }
 
-        console.log(`✅ PR Respondeu em ${latency}ms (Conteúdo Válido)`);
+        // Regra B: Se o corpo for muito pequeno, não é um WSDL válido (provavelmente erro vazio)
+        if (body.length < 100) {
+            console.log(`❌ FALHA: Resposta muito curta (${body.length} bytes)`);
+            return 'offline';
+        }
+
+        console.log(`✅ PR XML Válido (${latency}ms) - Tipo: ${contentType}`);
+
+        // Regra C: Latência
         return latency > 800 ? 'instavel' : 'online';
 
     } catch (error: any) {
-        // Log detalhado para debug na Vercel
         const code = error.code;
-        const msg = error.message;
-        console.log(`❌ FALHA REAL: ${code} - ${msg}`);
-
-        // Mapeamento dos erros do Vizinho para o nosso
-        if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') return 'offline';
-        if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return 'offline';
-
+        const status = error.response?.status;
+        console.log(`❌ FALHA REAL: ${code || status} - ${error.message}`);
         return 'offline';
     }
 }
@@ -71,7 +77,7 @@ export async function GET() {
         const randomVer = Math.floor(Math.random() * 20) + 110;
         const userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${randomVer}.0.0.0 Safari/537.36`;
 
-        // Busca Portal Nacional (Mantido igual)
+        // Busca Portal Nacional
         const response1 = await axios.get(targetUrl, {
             httpsAgent, timeout: 15000, maxRedirects: 0,
             validateStatus: (s) => s >= 200 && s < 400,
@@ -79,7 +85,6 @@ export async function GET() {
         });
 
         let html = response1.data;
-        // Tratamento de Redirect do Portal Nacional...
         if (response1.status === 302 || response1.status === 301) {
             const loc = response1.headers.location;
             if (loc) {
@@ -99,7 +104,6 @@ export async function GET() {
         $('table.tabelaListagemDados tr').each((i, row) => {
             const cols = $(row).find('td');
             if (cols.length < 6) return;
-
             const estado = cols.eq(0).text().trim();
             if (!estado || estado.length !== 2) return;
 
@@ -126,7 +130,6 @@ export async function GET() {
             const nfceData = { ...baseData, modelo: 'NFCe' };
             const endpointKey = `${estado}_NFCe`;
 
-            // Lógica de Override
             if (CRITICAL_ENDPOINTS[endpointKey]) {
                 const checkTask = checkRealEndpoint(CRITICAL_ENDPOINTS[endpointKey])
                     .then((realStatus) => {
