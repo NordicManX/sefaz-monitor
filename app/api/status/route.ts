@@ -4,6 +4,7 @@ import * as cheerio from 'cheerio';
 import https from 'https';
 import { supabase } from '@/lib/supabase';
 
+// Força o Next.js a não fazer cache de jeito nenhum
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
@@ -16,67 +17,68 @@ const httpsAgent = new https.Agent({
 // URL alvo (WSDL do PR)
 const PR_URL = 'https://nfce.sefa.pr.gov.br/nfce/NFeAutorizacao4?wsdl';
 
-// Variável global para guardar o debug da última execução
-let debugLog = "";
-
-async function checkRealEndpoint(url: string): Promise<{ status: 'online' | 'offline' | 'instavel', log: string }> {
+async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'instavel'> {
     const start = Date.now();
+    // Adiciona timestamp para garantir que a requisição é única
     const targetUrl = `${url}&cb=${Date.now()}`;
 
     try {
-        console.log(`[DEBUG] Iniciando teste forçado em: ${targetUrl}`);
+        console.log(`⚡ Testando PR: ${targetUrl}`);
 
         const response = await axios.get(targetUrl, {
             httpsAgent,
-            timeout: 10000,
+            timeout: 10000, // 10s timeout
             responseType: 'text',
-            headers: { 'User-Agent': 'Mozilla/5.0', 'Cache-Control': 'no-cache' },
-            validateStatus: (s) => true // Aceita tudo para lermos o corpo
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (compatible; Monitor/1.0)',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive'
+            },
+            validateStatus: (s) => true // Aceita qualquer status para analisarmos
         });
 
         const latency = Date.now() - start;
-        const body = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+        const body = typeof response.data === 'string' ? response.data : '';
         const code = response.status;
 
-        const preview = body.substring(0, 200).replace(/\n/g, ' '); // Pega o começo do texto
-        const logMsg = `HTTP ${code} (${latency}ms) - Inicio: "${preview}..."`;
+        // --- ANÁLISE DO BLOQUEIO ---
 
-        console.log(`[DEBUG_RESULT] ${logMsg}`);
+        // 1. Se o status não for 200 (OK), já consideramos falha
+        if (code !== 200) {
+            console.log(`❌ FALHA PR: Status ${code}`);
+            return 'offline';
+        }
 
-        // --- REGRAS DE BLOQUEIO ---
-
-        // 1. Se não for 200 OK -> Offline
-        if (code !== 200) return { status: 'offline', log: `Status ${code} (Não é 200). ${logMsg}` };
-
-        // 2. Se for HTML -> Offline (Bloqueio)
+        // 2. Se vier HTML (<!DOCTYPE, <html), é página de bloqueio disfarçada
         if (body.includes('<html') || body.includes('<!DOCTYPE')) {
-            return { status: 'offline', log: `DETECTADO HTML (BLOQUEIO). ${logMsg}` };
+            console.log(`❌ FALHA PR: HTML Detectado (Bloqueio)`);
+            return 'offline';
         }
 
-        // 3. Se for muito curto -> Offline
+        // 3. Se o corpo for muito pequeno (menos de 500 bytes), não é um WSDL válido
         if (body.length < 500) {
-            return { status: 'offline', log: `CORPO MUITO CURTO (${body.length}b). ${logMsg}` };
+            console.log(`❌ FALHA PR: Resposta muito curta (${body.length}b)`);
+            return 'offline';
         }
 
-        // 4. Se não tiver XML/WSDL -> Offline
-        if (!body.includes('wsdl') && !body.includes('schema')) {
-            return { status: 'offline', log: `XML INVÁLIDO. ${logMsg}` };
-        }
-
-        return { status: latency > 800 ? 'instavel' : 'online', log: `SUCESSO XML. ${logMsg}` };
+        console.log(`✅ SUCESSO PR: XML Válido (${latency}ms)`);
+        return latency > 1000 ? 'instavel' : 'online';
 
     } catch (error: any) {
-        return { status: 'offline', log: `ERRO AXIOS: ${error.message}` };
+        // AQUI PEGAMOS O SEU ERRO DE SOCKET
+        console.log(`❌ ERRO CONEXÃO PR: ${error.message}`);
+
+        // Qualquer erro de rede (Timeout, Socket Hang Up, TLS Error) vira OFFLINE
+        return 'offline';
     }
 }
 
 export async function GET() {
     try {
-        // --- 1. EXECUTA O TESTE DO PARANÁ PRIMEIRO E GUARDA O LOG ---
-        const prCheck = await checkRealEndpoint(PR_URL);
-        console.log("DIAGNOSTICO PR:", prCheck.log);
+        // 1. Executa o teste real do Paraná
+        const prStatus = await checkRealEndpoint(PR_URL);
 
-        // --- 2. LOGICA PADRÃO (PORTAL NACIONAL) ---
+        // 2. Scraping do Portal Nacional (Base)
         const targetUrl = "https://www.nfe.fazenda.gov.br/portal/disponibilidade.aspx";
         const randomVer = Math.floor(Math.random() * 20) + 110;
         const userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${randomVer}.0.0.0 Safari/537.36`;
@@ -103,7 +105,7 @@ export async function GET() {
         $('table.tabelaListagemDados tr').each((i, row) => {
             const cols = $(row).find('td');
             if (cols.length < 6) return;
-            const estado = cols.eq(0).text().trim(); // PR
+            const estado = cols.eq(0).text().trim();
             if (!estado || estado.length !== 2) return;
 
             const getStatusColor = (tdIndex: number) => {
@@ -126,15 +128,16 @@ export async function GET() {
 
             results.push({ ...baseData, modelo: 'NFe' });
 
-            // APLICA O DIAGNOSTICO NO PR
+            // APLICANDO A LÓGICA DO PR NA NFCe
             const nfceData = { ...baseData, modelo: 'NFCe' };
 
             if (estado === 'PR') {
-                // Se o teste real deu erro, SOBRESCREVE
-                if (prCheck.status !== 'online') {
-                    nfceData.autorizacao = prCheck.status;
-                    nfceData.status_servico = prCheck.status;
-                    if (prCheck.status === 'offline') {
+                // Se o nosso teste real disse que não está 'online', nós mandamos!
+                if (prStatus !== 'online') {
+                    nfceData.autorizacao = prStatus;
+                    nfceData.status_servico = prStatus;
+                    // Se estiver offline, derruba tudo
+                    if (prStatus === 'offline') {
                         nfceData.retorno_autorizacao = 'offline';
                         nfceData.consulta = 'offline';
                     }
@@ -145,17 +148,16 @@ export async function GET() {
 
         if (results.length === 0) return NextResponse.json({ error: "Falha Layout" }, { status: 502 });
 
+        // Salva no banco
         await supabase.from('sefaz_logs').insert(results);
 
-        // RETORNA O LOG DE DEBUG JUNTO COM O JSON PARA VOCÊ LER NO NAVEGADOR
-        return NextResponse.json({
-            data: results,
-            DEBUG_PR: prCheck.log  // <--- OLHE AQUI NO NAVEGADOR
-        }, {
+        // Retorna JSON limpo
+        return NextResponse.json(results, {
             headers: { 'Cache-Control': 'no-store, no-cache' }
         });
 
     } catch (error: any) {
-        return NextResponse.json({ error: "Falha técnica", details: error.message }, { status: 500 });
+        console.error("ERRO GERAL:", error.message);
+        return NextResponse.json({ error: "Falha técnica" }, { status: 500 });
     }
 }
