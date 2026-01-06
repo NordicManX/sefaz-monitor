@@ -1,8 +1,8 @@
 'use client';
 
 import { supabase } from '@/lib/supabase';
-import { useState, useEffect, useMemo } from 'react';
-import { ChevronDown, Wifi, AlertTriangle, Zap, CheckCircle2, XCircle, FileText, ShoppingCart, Eye, Clock, XOctagon } from 'lucide-react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { ChevronDown, Wifi, AlertTriangle, Zap, CheckCircle2, XCircle, FileText, ShoppingCart, Eye, Clock, XOctagon, Terminal } from 'lucide-react';
 
 type StateStatus = {
   estado: string;
@@ -13,6 +13,7 @@ type StateStatus = {
   consulta: string;
   status_servico: string;
   created_at?: string;
+  details?: string; // Nova coluna de detalhes do erro
 };
 
 type HistoryPoint = {
@@ -36,10 +37,10 @@ export default function Home() {
   const [visitCount, setVisitCount] = useState<number>(0);
   const [lastCheck, setLastCheck] = useState<Date>(new Date());
 
-  // Controle de "Dados Velhos"
   const [isStale, setIsStale] = useState(false);
   const [minutesAgo, setMinutesAgo] = useState(0);
 
+  // Stats para visita
   useEffect(() => {
     fetch('/api/visit', { cache: 'no-store' })
       .then(res => res.json())
@@ -47,20 +48,17 @@ export default function Home() {
       .catch(console.error);
   }, []);
 
+  // Check Stale
   useEffect(() => {
     if (!currentData?.created_at) return;
-
     const checkStale = () => {
       const lastDate = new Date(currentData.created_at!);
       const now = new Date();
       const diffMs = now.getTime() - lastDate.getTime();
       const diffMins = Math.floor(diffMs / 60000);
-
       setMinutesAgo(diffMins);
-      // Se faz mais de 5 minutos e não é offline, marca como dados antigos (Laranja)
       setIsStale(diffMins >= 5 && currentData.autorizacao !== 'offline');
     };
-
     checkStale();
     const timer = setInterval(checkStale, 5000);
     return () => clearInterval(timer);
@@ -74,7 +72,7 @@ export default function Home() {
         headers: { 'Cache-Control': 'no-cache' }
       });
     } catch (err) {
-      console.error("Erro ao atualizar status:", err);
+      console.error("Erro update:", err);
     }
   };
 
@@ -108,30 +106,20 @@ export default function Home() {
   useEffect(() => {
     setHistory([]);
     fetchHistory(selectedUF, selectedModel);
-
-    const interval = setInterval(() => {
-      updateRemoteStatus();
-    }, 15000);
+    const interval = setInterval(() => { updateRemoteStatus(); }, 15000);
 
     const channel = supabase
       .channel('sefaz-realtime-model')
       .on(
         'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'sefaz_logs',
-          filter: `estado=eq.${selectedUF}`
-        },
+        { event: 'INSERT', schema: 'public', table: 'sefaz_logs', filter: `estado=eq.${selectedUF}` },
         (payload) => {
           const newLog = payload.new as StateStatus;
-
           if (newLog.modelo === selectedModel) {
-            console.log("⚡ Realtime Update:", newLog.autorizacao);
+            console.log("⚡ Realtime:", newLog.autorizacao);
             setCurrentData(newLog);
             setIsStale(false);
             setMinutesAgo(0);
-
             setHistory((prev) => {
               const newPoint = {
                 time: new Date(newLog.created_at || Date.now()).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
@@ -153,18 +141,19 @@ export default function Home() {
 
   const headerStatus = useMemo(() => {
     if (!currentData) return { color: 'text-slate-500', icon: <Wifi className="w-3 h-3" />, text: 'Carregando...' };
-
-    // VERMELHO (OFFLINE)
     if (currentData.autorizacao === 'offline' || currentData.status_servico === 'offline') {
       return { color: 'text-rose-500 font-bold', icon: <XOctagon className="w-3 h-3" />, text: 'SEFAZ INDISPONÍVEL' };
     }
-    // LARANJA (DADOS ANTIGOS OU INSTÁVEL)
     if (isStale || currentData.autorizacao === 'instavel') {
       return { color: 'text-orange-500 font-bold', icon: <AlertTriangle className="w-3 h-3" />, text: 'Lentidão / Instável' };
     }
-    // VERDE (OK)
     return { color: 'text-emerald-500 font-bold', icon: <Wifi className="w-3 h-3" />, text: 'Sistema Online' };
   }, [currentData, isStale]);
+
+  // FILTRO DE LOGS DE ERRO
+  const errorLogs = useMemo(() => {
+    return history.filter(h => h.status.autorizacao === 'offline' || h.status.autorizacao === 'instavel');
+  }, [history]);
 
   return (
     <main className="min-h-screen bg-[#0B0F19] text-slate-300 font-sans p-4 md:p-8 flex flex-col items-center">
@@ -222,7 +211,6 @@ export default function Home() {
         </div>
       </header>
 
-      {/* CARD DE OFFLINE CRÍTICO (VERMELHO) */}
       {currentData?.autorizacao === 'offline' && (
         <div className="w-full max-w-5xl mb-6 bg-rose-500/10 border border-rose-500/30 p-4 rounded-xl flex items-center gap-3 text-rose-200 animate-pulse shadow-[0_0_20px_-5px_rgba(244,63,94,0.2)]">
           <XOctagon className="w-6 h-6 text-rose-500" />
@@ -233,7 +221,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* CARD DE LENTIDÃO/DADOS ANTIGOS (LARANJA) */}
       {(isStale || currentData?.autorizacao === 'instavel') && currentData?.autorizacao !== 'offline' && (
         <div className="w-full max-w-5xl mb-6 bg-orange-500/10 border border-orange-500/30 p-4 rounded-xl flex items-center gap-3 text-orange-200 animate-pulse">
           <AlertTriangle className="w-6 h-6 text-orange-500" />
@@ -274,6 +261,57 @@ export default function Home() {
         )}
       </div>
 
+      {/* --- LOGS DE ERRO (IGUAL AO VIZINHO) --- */}
+      <div className="w-full max-w-5xl mt-10">
+        <div className="flex items-center gap-2 mb-3 text-slate-400 border-b border-slate-800 pb-2">
+          <Terminal className="w-4 h-4" />
+          <h3 className="font-bold text-sm uppercase tracking-wider">Log de Incidentes Recentes</h3>
+        </div>
+
+        <div className="bg-[#0f1219] rounded-lg border border-slate-800 overflow-hidden font-mono text-xs shadow-inner min-h-[150px] max-h-[300px] overflow-y-auto custom-scrollbar">
+          {errorLogs.length === 0 ? (
+            <div className="p-8 text-center text-slate-600 italic">
+              Nenhum incidente registrado nas últimas horas. Sistema estável.
+            </div>
+          ) : (
+            <table className="w-full text-left">
+              <thead className="bg-slate-900 text-slate-500 sticky top-0">
+                <tr>
+                  <th className="p-3 font-medium">Data/Hora</th>
+                  <th className="p-3 font-medium">Status</th>
+                  <th className="p-3 font-medium">Detalhes do Erro</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50">
+                {errorLogs.slice(0, 50).map((log, idx) => (
+                  <tr key={idx} className="hover:bg-slate-800/30 transition-colors">
+                    <td className="p-3 text-slate-400 whitespace-nowrap">{log.fullDate}</td>
+                    <td className="p-3">
+                      {log.status.autorizacao === 'offline' ? (
+                        <span className="text-rose-500 font-bold">OFFLINE</span>
+                      ) : (
+                        <span className="text-orange-400 font-bold">LENTO</span>
+                      )}
+                    </td>
+                    <td className="p-3 text-slate-300 break-all">
+                      {log.status.details ? (
+                        <span>{log.status.details}</span>
+                      ) : (
+                        <span className="opacity-50 italic">
+                          {log.status.autorizacao === 'offline'
+                            ? "Client network socket disconnected - Timeout na conexão"
+                            : "Tempo de resposta elevado detectado"}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
       <div className="fixed bottom-4 right-4 text-[10px] text-slate-600 font-mono bg-slate-900 px-3 py-1.5 rounded border border-slate-800 flex items-center gap-2">
         <Clock className="w-3 h-3" />
         Último Sync: {lastCheck.toLocaleTimeString()}
@@ -292,11 +330,8 @@ export default function Home() {
   );
 }
 
-// --- Componentes Visuais Ajustados para as Cores Solicitadas ---
-
+// --- Componentes Visuais ---
 function StatusBadge({ label, status, isStale }: { label: string, status: string, isStale: boolean }) {
-
-  // VERMELHO (OFFLINE) - Prioridade Máxima
   if (status === 'offline') {
     return (
       <div className="flex items-center justify-between p-3 rounded-lg border bg-rose-500/10 border-rose-500/30 transition-all duration-500 shadow-[0_0_15px_-5px_rgba(244,63,94,0.3)]">
@@ -305,8 +340,6 @@ function StatusBadge({ label, status, isStale }: { label: string, status: string
       </div>
     );
   }
-
-  // LARANJA (INSTÁVEL OU DADOS ANTIGOS)
   if (isStale || status === 'instavel') {
     return (
       <div className="flex items-center justify-between p-3 rounded-lg border bg-orange-500/10 border-orange-500/30 transition-all duration-500">
@@ -315,8 +348,6 @@ function StatusBadge({ label, status, isStale }: { label: string, status: string
       </div>
     );
   }
-
-  // VERDE (ONLINE)
   return (
     <div className="flex items-center justify-between p-3 rounded-lg border bg-emerald-500/5 border-emerald-500/20 transition-all duration-500">
       <span className="text-xs font-medium text-slate-400">{label}</span>
@@ -348,19 +379,16 @@ function UptimeRow({ label, history, field }: { label: string, history: HistoryP
         {paddedHistory.map((point, i) => {
           if (!point) return <div key={`empty-${i}`} className="flex-1 bg-slate-800/40 rounded-[2px]" />;
           const status = point.status[field];
-
-          // Lógica de Cores da Barra (Igual ao Vizinho)
-          let colorClass = 'bg-emerald-500 shadow-[0_0_8px_-2px_rgba(16,185,129,0.5)]'; // Verde (Padrão)
-
-          if (status === 'instavel') colorClass = 'bg-orange-500 shadow-[0_0_8px_-2px_rgba(249,115,22,0.5)]'; // Laranja (Demora)
-          if (status === 'offline') colorClass = 'bg-rose-600 shadow-[0_0_8px_-2px_rgba(244,63,94,0.8)]'; // Vermelho (Erro)
+          let colorClass = 'bg-emerald-500 shadow-[0_0_8px_-2px_rgba(16,185,129,0.5)]';
+          if (status === 'instavel') colorClass = 'bg-orange-500 shadow-[0_0_8px_-2px_rgba(249,115,22,0.5)]';
+          if (status === 'offline') colorClass = 'bg-rose-600 shadow-[0_0_8px_-2px_rgba(244,63,94,0.8)]';
 
           return (
             <div key={i} className="relative flex-1 group/bar">
               <div className={`h-full w-full rounded-[2px] transition-all duration-300 hover:scale-y-110 ${colorClass}`}></div>
               <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 opacity-0 group-hover/bar:opacity-100 transition-opacity z-20 pointer-events-none">
                 <div className="bg-slate-900 text-slate-200 text-[10px] px-2 py-1 rounded border border-slate-700 whitespace-nowrap shadow-xl">
-                  <div className="font-bold mb-0.5 uppercase">{status === 'instavel' ? 'LENTO' : status}</div>
+                  <div className="font-bold mb-0.5 uppercase">{status}</div>
                   <div className="text-slate-500 font-mono">{point.time}</div>
                 </div>
               </div>

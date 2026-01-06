@@ -13,10 +13,10 @@ const httpsAgent = new https.Agent({
     ciphers: 'DEFAULT@SECLEVEL=1'
 });
 
-// URL alvo (WSDL do PR)
 const PR_URL = 'https://nfce.sefa.pr.gov.br/nfce/NFeAutorizacao4?wsdl';
 
-async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'instavel'> {
+// Agora retorna Objeto com status E mensagem
+async function checkRealEndpoint(url: string): Promise<{ status: 'online' | 'offline' | 'instavel', msg: string }> {
     const start = Date.now();
     const targetUrl = `${url}&cb=${Date.now()}`;
 
@@ -25,7 +25,7 @@ async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'i
 
         const response = await axios.get(targetUrl, {
             httpsAgent,
-            timeout: 10000, // 10s timeout
+            timeout: 15000,
             responseType: 'text',
             headers: {
                 'User-Agent': 'Mozilla/5.0 (compatible; Monitor/1.0)',
@@ -39,38 +39,38 @@ async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'i
         const body = typeof response.data === 'string' ? response.data : '';
         const code = response.status;
 
-
         if (code !== 200) {
-            console.log(`❌ FALHA PR: Status ${code}`);
-            return 'offline';
+            return { status: 'offline', msg: `HTTP Error ${code} - URL: ${url}` };
         }
 
         if (body.includes('<html') || body.includes('<!DOCTYPE')) {
-            console.log(`❌ FALHA PR: HTML Detectado (Bloqueio)`);
-            return 'offline';
+            return { status: 'offline', msg: `Bloqueio WAF Detectado (HTML Recebido) - URL: ${url}` };
         }
 
         if (body.length < 500) {
-            console.log(`❌ FALHA PR: Resposta muito curta (${body.length}b)`);
-            return 'offline';
+            return { status: 'offline', msg: `Resposta Inválida/Curta (${body.length}b) - URL: ${url}` };
         }
 
-        console.log(`✅ SUCESSO PR: XML Válido (${latency}ms)`);
-        return latency > 1000 ? 'instavel' : 'online';
+        // Se demorar muito, marca instável mas sem erro crítico
+        if (latency > 1000) {
+            return { status: 'instavel', msg: `Lentidão severa: ${latency}ms` };
+        }
+
+        return { status: 'online', msg: 'OK' };
 
     } catch (error: any) {
-        console.log(`❌ ERRO CONEXÃO PR: ${error.message}`);
-
-        return 'offline';
+        // CAPTURA O ERRO TÉCNICO EXATO
+        const errorMsg = error.message || error.code || "Erro desconhecido";
+        return { status: 'offline', msg: `${errorMsg} - URL: ${url}` };
     }
 }
 
 export async function GET() {
     try {
-        // 1. Executa o teste real do Paraná
-        const prStatus = await checkRealEndpoint(PR_URL);
+        // 1. Teste Real
+        const prCheck = await checkRealEndpoint(PR_URL);
 
-        // 2. Scraping do Portal Nacional (Base)
+        // 2. Scraping Portal Nacional
         const targetUrl = "https://www.nfe.fazenda.gov.br/portal/disponibilidade.aspx";
         const randomVer = Math.floor(Math.random() * 20) + 110;
         const userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${randomVer}.0.0.0 Safari/537.36`;
@@ -116,6 +116,7 @@ export async function GET() {
                 inutilizacao: getStatusColor(3),
                 consulta: getStatusColor(4),
                 status_servico: getStatusColor(5),
+                details: null // Padrão nulo
             };
 
             results.push({ ...baseData, modelo: 'NFe' });
@@ -123,14 +124,15 @@ export async function GET() {
             const nfceData = { ...baseData, modelo: 'NFCe' };
 
             if (estado === 'PR') {
-
-                if (prStatus !== 'online') {
-                    nfceData.autorizacao = prStatus;
-                    nfceData.status_servico = prStatus;
-
-                    if (prStatus === 'offline') {
+                if (prCheck.status !== 'online') {
+                    nfceData.autorizacao = prCheck.status;
+                    nfceData.status_servico = prCheck.status;
+                    if (prCheck.status === 'offline') {
                         nfceData.retorno_autorizacao = 'offline';
                         nfceData.consulta = 'offline';
+                        // AQUI SALVAMOS A MENSAGEM DO ERRO NO BANCO
+                        // @ts-ignore
+                        nfceData.details = prCheck.msg;
                     }
                 }
             }
@@ -139,10 +141,8 @@ export async function GET() {
 
         if (results.length === 0) return NextResponse.json({ error: "Falha Layout" }, { status: 502 });
 
-        // Salva no banco
         await supabase.from('sefaz_logs').insert(results);
 
-        // Retorna JSON limpo
         return NextResponse.json(results, {
             headers: { 'Cache-Control': 'no-store, no-cache' }
         });
