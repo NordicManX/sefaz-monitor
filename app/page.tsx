@@ -188,7 +188,7 @@ export default function Home() {
               {headerStatus.text}
             </div>
             <p className="text-xs text-slate-500 flex items-center gap-1">
-              <Zap className="w-3 h-3 text-amber-400 fill-amber-400" /> Realtime
+              <Zap className="w-3 h-3 text-amber-400 fill-amber-400" /> Tempo Real
             </p>
           </div>
         </div>
