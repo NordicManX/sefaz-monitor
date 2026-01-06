@@ -40,7 +40,6 @@ export default function Home() {
   const [isStale, setIsStale] = useState(false);
   const [minutesAgo, setMinutesAgo] = useState(0);
 
-  // Busca visitas
   useEffect(() => {
     fetch('/api/visit', { cache: 'no-store' })
       .then(res => res.json())
@@ -48,7 +47,6 @@ export default function Home() {
       .catch(console.error);
   }, []);
 
-  // Verifica se os dados estão velhos
   useEffect(() => {
     if (!currentData?.created_at) return;
 
@@ -59,21 +57,18 @@ export default function Home() {
       const diffMins = Math.floor(diffMs / 60000);
 
       setMinutesAgo(diffMins);
-      // Considera obsoleto apenas se não for erro crítico e tiver passado 5 min
+      // Se faz mais de 5 minutos e não é offline, marca como dados antigos (Laranja)
       setIsStale(diffMins >= 5 && currentData.autorizacao !== 'offline');
     };
 
     checkStale();
-    const timer = setInterval(checkStale, 5000); // Checa a cada 5s
+    const timer = setInterval(checkStale, 5000);
     return () => clearInterval(timer);
   }, [currentData]);
 
-  // Função que FORÇA a atualização real
   const updateRemoteStatus = async () => {
     try {
       setLastCheck(new Date());
-      // ADICIONADO TIMESTAMP (?t=...) PARA EVITAR CACHE DO NAVEGADOR
-      // Isso garante que ele pegue o status "Verde" assim que voltar
       await fetch(`/api/status?t=${Date.now()}`, {
         cache: 'no-store',
         headers: { 'Cache-Control': 'no-cache' }
@@ -83,7 +78,6 @@ export default function Home() {
     }
   };
 
-  // Busca Histórico
   const fetchHistory = async (uf: string, modelo: string) => {
     setLoading(true);
     try {
@@ -111,17 +105,14 @@ export default function Home() {
     }
   };
 
-  // Efeito Principal (Loop de Atualização)
   useEffect(() => {
     setHistory([]);
     fetchHistory(selectedUF, selectedModel);
 
-    // Roda a atualização a cada 15 segundos
     const interval = setInterval(() => {
       updateRemoteStatus();
     }, 15000);
 
-    // Realtime Listener (Supabase)
     const channel = supabase
       .channel('sefaz-realtime-model')
       .on(
@@ -136,7 +127,7 @@ export default function Home() {
           const newLog = payload.new as StateStatus;
 
           if (newLog.modelo === selectedModel) {
-            console.log("⚡ Realtime: Novo status recebido ->", newLog.autorizacao);
+            console.log("⚡ Realtime Update:", newLog.autorizacao);
             setCurrentData(newLog);
             setIsStale(false);
             setMinutesAgo(0);
@@ -160,24 +151,19 @@ export default function Home() {
     };
   }, [selectedUF, selectedModel]);
 
-  // Lógica do Status Geral do Header
   const headerStatus = useMemo(() => {
     if (!currentData) return { color: 'text-slate-500', icon: <Wifi className="w-3 h-3" />, text: 'Carregando...' };
 
-    // VERMELHO: Se autorização ou serviço estiverem offline
+    // VERMELHO (OFFLINE)
     if (currentData.autorizacao === 'offline' || currentData.status_servico === 'offline') {
       return { color: 'text-rose-500 font-bold', icon: <XOctagon className="w-3 h-3" />, text: 'SEFAZ INDISPONÍVEL' };
     }
-    // LARANJA: Dados antigos (Stale)
-    if (isStale) {
-      return { color: 'text-amber-500 font-bold', icon: <AlertTriangle className="w-3 h-3" />, text: 'Dados Antigos / Instabilidade' };
+    // LARANJA (DADOS ANTIGOS OU INSTÁVEL)
+    if (isStale || currentData.autorizacao === 'instavel') {
+      return { color: 'text-orange-500 font-bold', icon: <AlertTriangle className="w-3 h-3" />, text: 'Lentidão / Instável' };
     }
-    // AMARELO: Instável (Lentidão)
-    if (currentData.autorizacao === 'instavel') {
-      return { color: 'text-yellow-400 font-bold', icon: <AlertTriangle className="w-3 h-3" />, text: 'Lentidão Detectada' };
-    }
-    // VERDE: Tudo OK
-    return { color: 'text-emerald-500 font-bold', icon: <Wifi className="w-3 h-3" />, text: 'Tempo Real' };
+    // VERDE (OK)
+    return { color: 'text-emerald-500 font-bold', icon: <Wifi className="w-3 h-3" />, text: 'Sistema Online' };
   }, [currentData, isStale]);
 
   return (
@@ -193,7 +179,6 @@ export default function Home() {
               {headerStatus.icon}
               {headerStatus.text}
             </div>
-            {/* Indicador de "Ping" visual */}
             <div className="flex items-center gap-1">
               <span className="relative flex h-2 w-2">
                 <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${loading ? 'bg-indigo-400' : 'bg-emerald-400'}`}></span>
@@ -248,6 +233,17 @@ export default function Home() {
         </div>
       )}
 
+      {/* CARD DE LENTIDÃO/DADOS ANTIGOS (LARANJA) */}
+      {(isStale || currentData?.autorizacao === 'instavel') && currentData?.autorizacao !== 'offline' && (
+        <div className="w-full max-w-5xl mb-6 bg-orange-500/10 border border-orange-500/30 p-4 rounded-xl flex items-center gap-3 text-orange-200 animate-pulse">
+          <AlertTriangle className="w-6 h-6 text-orange-500" />
+          <div>
+            <p className="font-bold text-sm">Instabilidade ou Lentidão Detectada</p>
+            <p className="text-xs opacity-80">O tempo de resposta está alto ou os dados estão demorando para atualizar.</p>
+          </div>
+        </div>
+      )}
+
       <div className="w-full max-w-5xl space-y-8 flex-1">
         {loading && !currentData ? (
           <div className="h-64 rounded-2xl bg-slate-800/30 animate-pulse border border-slate-700/30"></div>
@@ -296,11 +292,11 @@ export default function Home() {
   );
 }
 
-// --- Componentes Visuais ---
+// --- Componentes Visuais Ajustados para as Cores Solicitadas ---
 
 function StatusBadge({ label, status, isStale }: { label: string, status: string, isStale: boolean }) {
-  // LÓGICA AUTOMÁTICA DE CORES
-  // 1. Prioridade Máxima: OFFLINE (Vermelho)
+
+  // VERMELHO (OFFLINE) - Prioridade Máxima
   if (status === 'offline') {
     return (
       <div className="flex items-center justify-between p-3 rounded-lg border bg-rose-500/10 border-rose-500/30 transition-all duration-500 shadow-[0_0_15px_-5px_rgba(244,63,94,0.3)]">
@@ -310,36 +306,27 @@ function StatusBadge({ label, status, isStale }: { label: string, status: string
     );
   }
 
-  // 2. Prioridade Média: Dados Antigos (Cinza/Laranja)
-  if (isStale) {
+  // LARANJA (INSTÁVEL OU DADOS ANTIGOS)
+  if (isStale || status === 'instavel') {
     return (
-      <div className="flex items-center justify-between p-3 rounded-lg border bg-slate-800/20 border-slate-700/50 opacity-60 grayscale">
-        <span className="text-xs font-medium text-slate-500">{label}</span>
-        <AlertTriangle className="w-4 h-4 text-slate-500" />
+      <div className="flex items-center justify-between p-3 rounded-lg border bg-orange-500/10 border-orange-500/30 transition-all duration-500">
+        <span className="text-xs font-bold text-orange-400">{label}</span>
+        <AlertTriangle className="w-4 h-4 text-orange-500 animate-pulse" />
       </div>
     );
   }
 
-  // 3. Estado Normal: Verde, Amarelo ou Vermelho (Instabilidade)
-  const isOnline = status === 'online';
-  const isUnstable = status === 'instavel';
-
+  // VERDE (ONLINE)
   return (
-    <div className={`
-      flex items-center justify-between p-3 rounded-lg border transition-all duration-500
-      ${isOnline ? 'bg-emerald-500/5 border-emerald-500/20' : isUnstable ? 'bg-amber-400/5 border-amber-400/20' : 'bg-rose-500/5 border-rose-500/20'}
-    `}>
+    <div className="flex items-center justify-between p-3 rounded-lg border bg-emerald-500/5 border-emerald-500/20 transition-all duration-500">
       <span className="text-xs font-medium text-slate-400">{label}</span>
-      {isOnline ? <CheckCircle2 className="w-4 h-4 text-emerald-500" /> :
-        isUnstable ? <AlertTriangle className="w-4 h-4 text-amber-400" /> :
-          <XCircle className="w-4 h-4 text-rose-500" />}
+      <CheckCircle2 className="w-4 h-4 text-emerald-500" />
     </div>
   );
 }
 
 function UptimeRow({ label, history, field }: { label: string, history: HistoryPoint[], field: keyof StateStatus }) {
   const TOTAL_BARS = 60;
-  // Calcula % excluindo 'offline'
   const onlineCount = history.filter(h => h.status[field] === 'online').length;
   const total = history.length;
   const uptimePercentage = total > 0 ? ((onlineCount / total) * 100).toFixed(1) : '0.0';
@@ -353,7 +340,7 @@ function UptimeRow({ label, history, field }: { label: string, history: HistoryP
         <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
           {label}
         </h3>
-        <span className={`text-xs font-mono font-bold ${Number(uptimePercentage) > 95 ? 'text-emerald-400' : Number(uptimePercentage) > 70 ? 'text-amber-400' : 'text-rose-400'}`}>
+        <span className={`text-xs font-mono font-bold ${Number(uptimePercentage) > 95 ? 'text-emerald-400' : Number(uptimePercentage) > 70 ? 'text-orange-400' : 'text-rose-400'}`}>
           {total > 0 ? `${uptimePercentage}% Uptime` : '...'}
         </span>
       </div>
@@ -362,17 +349,18 @@ function UptimeRow({ label, history, field }: { label: string, history: HistoryP
           if (!point) return <div key={`empty-${i}`} className="flex-1 bg-slate-800/40 rounded-[2px]" />;
           const status = point.status[field];
 
-          let colorClass = 'bg-emerald-500 shadow-[0_0_8px_-2px_rgba(16,185,129,0.5)]'; // Verde Padrão
+          // Lógica de Cores da Barra (Igual ao Vizinho)
+          let colorClass = 'bg-emerald-500 shadow-[0_0_8px_-2px_rgba(16,185,129,0.5)]'; // Verde (Padrão)
 
-          if (status === 'instavel') colorClass = 'bg-amber-400 shadow-[0_0_8px_-2px_rgba(251,191,36,0.5)]'; // Amarelo
-          if (status === 'offline') colorClass = 'bg-rose-600 shadow-[0_0_8px_-2px_rgba(244,63,94,0.8)]'; // Vermelho
+          if (status === 'instavel') colorClass = 'bg-orange-500 shadow-[0_0_8px_-2px_rgba(249,115,22,0.5)]'; // Laranja (Demora)
+          if (status === 'offline') colorClass = 'bg-rose-600 shadow-[0_0_8px_-2px_rgba(244,63,94,0.8)]'; // Vermelho (Erro)
 
           return (
             <div key={i} className="relative flex-1 group/bar">
               <div className={`h-full w-full rounded-[2px] transition-all duration-300 hover:scale-y-110 ${colorClass}`}></div>
               <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 opacity-0 group-hover/bar:opacity-100 transition-opacity z-20 pointer-events-none">
                 <div className="bg-slate-900 text-slate-200 text-[10px] px-2 py-1 rounded border border-slate-700 whitespace-nowrap shadow-xl">
-                  <div className="font-bold mb-0.5 uppercase">{status}</div>
+                  <div className="font-bold mb-0.5 uppercase">{status === 'instavel' ? 'LENTO' : status}</div>
                   <div className="text-slate-500 font-mono">{point.time}</div>
                 </div>
               </div>
