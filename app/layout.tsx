@@ -16,7 +16,7 @@ export const metadata: Metadata = {
   title: 'Monitor SEFAZ - Status em Tempo Real',
   description: 'Monitoramento de disponibilidade da NFe e NFCe por Estado',
   icons: {
-    icon: '/square-activity.svg',
+    icon: '/server-crash.svg',
   }
 }
 
