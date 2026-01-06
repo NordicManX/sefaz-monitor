@@ -34,6 +34,7 @@ export default function Home() {
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [visitCount, setVisitCount] = useState<number>(0);
+  const [lastCheck, setLastCheck] = useState<Date>(new Date());
 
   // Controle de "Dados Velhos"
   const [isStale, setIsStale] = useState(false);
@@ -47,7 +48,7 @@ export default function Home() {
       .catch(console.error);
   }, []);
 
-  // Verifica se os dados estão velhos (mais de 5 min)
+  // Verifica se os dados estão velhos
   useEffect(() => {
     if (!currentData?.created_at) return;
 
@@ -58,20 +59,35 @@ export default function Home() {
       const diffMins = Math.floor(diffMs / 60000);
 
       setMinutesAgo(diffMins);
-      // Se faz mais de 5 minutos que não atualiza, considera obsoleto
-      setIsStale(diffMins >= 5);
+      // Considera obsoleto apenas se não for erro crítico e tiver passado 5 min
+      setIsStale(diffMins >= 5 && currentData.autorizacao !== 'offline');
     };
 
     checkStale();
-    const timer = setInterval(checkStale, 15000); // Re-checa a cada 15s para ser ágil
+    const timer = setInterval(checkStale, 5000); // Checa a cada 5s
     return () => clearInterval(timer);
   }, [currentData]);
+
+  // Função que FORÇA a atualização real
+  const updateRemoteStatus = async () => {
+    try {
+      setLastCheck(new Date());
+      // ADICIONADO TIMESTAMP (?t=...) PARA EVITAR CACHE DO NAVEGADOR
+      // Isso garante que ele pegue o status "Verde" assim que voltar
+      await fetch(`/api/status?t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache' }
+      });
+    } catch (err) {
+      console.error("Erro ao atualizar status:", err);
+    }
+  };
 
   // Busca Histórico
   const fetchHistory = async (uf: string, modelo: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/history?uf=${uf}&modelo=${modelo}`, { cache: 'no-store' });
+      const res = await fetch(`/api/history?uf=${uf}&modelo=${modelo}&t=${Date.now()}`, { cache: 'no-store' });
       const json = await res.json();
 
       if (Array.isArray(json) && json.length > 0) {
@@ -86,7 +102,6 @@ export default function Home() {
 
         setHistory(formattedHistory);
       } else {
-        // Se não tem histórico, tenta forçar update
         updateRemoteStatus();
       }
     } catch (err) {
@@ -96,24 +111,17 @@ export default function Home() {
     }
   };
 
-  const updateRemoteStatus = async () => {
-    try {
-      console.log("Forçando atualização remota...");
-      await fetch('/api/status', { cache: 'no-store' });
-    } catch (err) {
-      console.error("Erro ao atualizar status:", err);
-    }
-  };
-
-  // Efeito Principal
+  // Efeito Principal (Loop de Atualização)
   useEffect(() => {
     setHistory([]);
     fetchHistory(selectedUF, selectedModel);
 
-    // Tenta atualizar a cada 15s (Frequência Alta)
-    const interval = setInterval(() => { updateRemoteStatus(); }, 15000);
+    // Roda a atualização a cada 15 segundos
+    const interval = setInterval(() => {
+      updateRemoteStatus();
+    }, 15000);
 
-    // Realtime Listener
+    // Realtime Listener (Supabase)
     const channel = supabase
       .channel('sefaz-realtime-model')
       .on(
@@ -128,10 +136,8 @@ export default function Home() {
           const newLog = payload.new as StateStatus;
 
           if (newLog.modelo === selectedModel) {
-            console.log("⚡ Realtime Update recebido!");
+            console.log("⚡ Realtime: Novo status recebido ->", newLog.autorizacao);
             setCurrentData(newLog);
-
-            // Reseta status de 'obsoleto' pois acabou de chegar dado novo
             setIsStale(false);
             setMinutesAgo(0);
 
@@ -158,20 +164,20 @@ export default function Home() {
   const headerStatus = useMemo(() => {
     if (!currentData) return { color: 'text-slate-500', icon: <Wifi className="w-3 h-3" />, text: 'Carregando...' };
 
-    // PRIORIDADE 1: SEFAZ OFFLINE (Vermelho)
+    // VERMELHO: Se autorização ou serviço estiverem offline
     if (currentData.autorizacao === 'offline' || currentData.status_servico === 'offline') {
       return { color: 'text-rose-500 font-bold', icon: <XOctagon className="w-3 h-3" />, text: 'SEFAZ INDISPONÍVEL' };
     }
-    // PRIORIDADE 2: DADOS ANTIGOS (Laranja)
+    // LARANJA: Dados antigos (Stale)
     if (isStale) {
-      return { color: 'text-amber-500 font-bold', icon: <AlertTriangle className="w-3 h-3" />, text: 'Conexão Instável / Dados Antigos' };
+      return { color: 'text-amber-500 font-bold', icon: <AlertTriangle className="w-3 h-3" />, text: 'Dados Antigos / Instabilidade' };
     }
-    // PRIORIDADE 3: INSTÁVEL (Amarelo)
+    // AMARELO: Instável (Lentidão)
     if (currentData.autorizacao === 'instavel') {
       return { color: 'text-yellow-400 font-bold', icon: <AlertTriangle className="w-3 h-3" />, text: 'Lentidão Detectada' };
     }
-    // PRIORIDADE 4: ONLINE (Verde)
-    return { color: 'text-emerald-500', icon: <Wifi className="w-3 h-3" />, text: 'Sistema Online' };
+    // VERDE: Tudo OK
+    return { color: 'text-emerald-500 font-bold', icon: <Wifi className="w-3 h-3" />, text: 'Tempo Real' };
   }, [currentData, isStale]);
 
   return (
@@ -183,13 +189,20 @@ export default function Home() {
             Monitor SEFAZ <span className="text-indigo-500">{selectedUF}</span>
           </h1>
           <div className="flex items-center gap-4 mt-2">
-            <div className={`flex items-center gap-1 text-xs ${headerStatus.color}`}>
+            <div className={`flex items-center gap-1 text-xs transition-colors duration-500 ${headerStatus.color}`}>
               {headerStatus.icon}
               {headerStatus.text}
             </div>
-            <p className="text-xs text-slate-500 flex items-center gap-1">
-              <Zap className="w-3 h-3 text-amber-400 fill-amber-400" /> Tempo Real
-            </p>
+            {/* Indicador de "Ping" visual */}
+            <div className="flex items-center gap-1">
+              <span className="relative flex h-2 w-2">
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${loading ? 'bg-indigo-400' : 'bg-emerald-400'}`}></span>
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${loading ? 'bg-indigo-500' : 'bg-emerald-500'}`}></span>
+              </span>
+              <span className="text-[10px] text-slate-600 font-mono">
+                {loading ? 'Atualizando...' : 'Live'}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -224,26 +237,9 @@ export default function Home() {
         </div>
       </header>
 
-      {/* ALERTA DE DADOS DESATUALIZADOS */}
-      {isStale && currentData?.autorizacao !== 'offline' && (
-        <div className="w-full max-w-5xl mb-6 bg-amber-500/10 border border-amber-500/30 p-4 rounded-xl flex items-center gap-3 text-amber-200 animate-pulse">
-          <AlertTriangle className="w-6 h-6 text-amber-500" />
-          <div>
-            <p className="font-bold text-sm">Atenção: Os dados exibidos podem estar desatualizados.</p>
-            <p className="text-xs opacity-80">Última atualização recebida da SEFAZ foi há {minutesAgo} minutos. Possível instabilidade na coleta.</p>
-          </div>
-          <button
-            onClick={() => updateRemoteStatus()}
-            className="ml-auto bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 px-3 py-1 rounded text-xs font-bold transition-colors"
-          >
-            Forçar Atualização
-          </button>
-        </div>
-      )}
-
-      {/* ALERTA DE OFFLINE CRÍTICO */}
+      {/* CARD DE OFFLINE CRÍTICO (VERMELHO) */}
       {currentData?.autorizacao === 'offline' && (
-        <div className="w-full max-w-5xl mb-6 bg-rose-500/10 border border-rose-500/30 p-4 rounded-xl flex items-center gap-3 text-rose-200 animate-pulse">
+        <div className="w-full max-w-5xl mb-6 bg-rose-500/10 border border-rose-500/30 p-4 rounded-xl flex items-center gap-3 text-rose-200 animate-pulse shadow-[0_0_20px_-5px_rgba(244,63,94,0.2)]">
           <XOctagon className="w-6 h-6 text-rose-500" />
           <div>
             <p className="font-bold text-sm">CRÍTICO: SERVIÇO INDISPONÍVEL</p>
@@ -284,7 +280,7 @@ export default function Home() {
 
       <div className="fixed bottom-4 right-4 text-[10px] text-slate-600 font-mono bg-slate-900 px-3 py-1.5 rounded border border-slate-800 flex items-center gap-2">
         <Clock className="w-3 h-3" />
-        Último Sync: {currentData?.created_at ? new Date(currentData.created_at).toLocaleTimeString() : '--:--'}
+        Último Sync: {lastCheck.toLocaleTimeString()}
       </div>
 
       <footer className="w-full max-w-5xl mt-12 pt-8 pb-4 border-t border-slate-800/50 flex flex-col items-center gap-3">
@@ -303,8 +299,8 @@ export default function Home() {
 // --- Componentes Visuais ---
 
 function StatusBadge({ label, status, isStale }: { label: string, status: string, isStale: boolean }) {
-  // PRIORIDADE 1: Se for OFFLINE, mostra vermelho IMEDIATAMENTE.
-  // Ignora se está obsoleto ou não, pois erro de conexão é crítico.
+  // LÓGICA AUTOMÁTICA DE CORES
+  // 1. Prioridade Máxima: OFFLINE (Vermelho)
   if (status === 'offline') {
     return (
       <div className="flex items-center justify-between p-3 rounded-lg border bg-rose-500/10 border-rose-500/30 transition-all duration-500 shadow-[0_0_15px_-5px_rgba(244,63,94,0.3)]">
@@ -314,7 +310,7 @@ function StatusBadge({ label, status, isStale }: { label: string, status: string
     );
   }
 
-  // PRIORIDADE 2: Se não for offline, mas for antigo (stale)
+  // 2. Prioridade Média: Dados Antigos (Cinza/Laranja)
   if (isStale) {
     return (
       <div className="flex items-center justify-between p-3 rounded-lg border bg-slate-800/20 border-slate-700/50 opacity-60 grayscale">
@@ -324,6 +320,7 @@ function StatusBadge({ label, status, isStale }: { label: string, status: string
     );
   }
 
+  // 3. Estado Normal: Verde, Amarelo ou Vermelho (Instabilidade)
   const isOnline = status === 'online';
   const isUnstable = status === 'instavel';
 
@@ -342,9 +339,9 @@ function StatusBadge({ label, status, isStale }: { label: string, status: string
 
 function UptimeRow({ label, history, field }: { label: string, history: HistoryPoint[], field: keyof StateStatus }) {
   const TOTAL_BARS = 60;
-  const total = history.length;
-  // Calcula uptime excluindo 'offline'
+  // Calcula % excluindo 'offline'
   const onlineCount = history.filter(h => h.status[field] === 'online').length;
+  const total = history.length;
   const uptimePercentage = total > 0 ? ((onlineCount / total) * 100).toFixed(1) : '0.0';
 
   const displayHistory = [...history].reverse();
@@ -364,11 +361,11 @@ function UptimeRow({ label, history, field }: { label: string, history: HistoryP
         {paddedHistory.map((point, i) => {
           if (!point) return <div key={`empty-${i}`} className="flex-1 bg-slate-800/40 rounded-[2px]" />;
           const status = point.status[field];
-          let colorClass = 'bg-emerald-500 shadow-[0_0_8px_-2px_rgba(16,185,129,0.5)]';
 
-          if (status === 'instavel') colorClass = 'bg-amber-400 shadow-[0_0_8px_-2px_rgba(251,191,36,0.5)]';
-          // Offline agora fica VERMELHO FORTE e pulsante se for o último
-          if (status === 'offline') colorClass = 'bg-rose-600 shadow-[0_0_8px_-2px_rgba(244,63,94,0.8)]';
+          let colorClass = 'bg-emerald-500 shadow-[0_0_8px_-2px_rgba(16,185,129,0.5)]'; // Verde Padrão
+
+          if (status === 'instavel') colorClass = 'bg-amber-400 shadow-[0_0_8px_-2px_rgba(251,191,36,0.5)]'; // Amarelo
+          if (status === 'offline') colorClass = 'bg-rose-600 shadow-[0_0_8px_-2px_rgba(244,63,94,0.8)]'; // Vermelho
 
           return (
             <div key={i} className="relative flex-1 group/bar">
