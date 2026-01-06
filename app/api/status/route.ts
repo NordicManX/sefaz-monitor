@@ -4,7 +4,6 @@ import * as cheerio from 'cheerio';
 import https from 'https';
 import { supabase } from '@/lib/supabase';
 
-// Força o Next.js a não fazer cache de jeito nenhum
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
@@ -19,7 +18,6 @@ const PR_URL = 'https://nfce.sefa.pr.gov.br/nfce/NFeAutorizacao4?wsdl';
 
 async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'instavel'> {
     const start = Date.now();
-    // Adiciona timestamp para garantir que a requisição é única
     const targetUrl = `${url}&cb=${Date.now()}`;
 
     try {
@@ -34,28 +32,24 @@ async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'i
                 'Cache-Control': 'no-cache',
                 'Connection': 'keep-alive'
             },
-            validateStatus: (s) => true // Aceita qualquer status para analisarmos
+            validateStatus: (s) => true
         });
 
         const latency = Date.now() - start;
         const body = typeof response.data === 'string' ? response.data : '';
         const code = response.status;
 
-        // --- ANÁLISE DO BLOQUEIO ---
 
-        // 1. Se o status não for 200 (OK), já consideramos falha
         if (code !== 200) {
             console.log(`❌ FALHA PR: Status ${code}`);
             return 'offline';
         }
 
-        // 2. Se vier HTML (<!DOCTYPE, <html), é página de bloqueio disfarçada
         if (body.includes('<html') || body.includes('<!DOCTYPE')) {
             console.log(`❌ FALHA PR: HTML Detectado (Bloqueio)`);
             return 'offline';
         }
 
-        // 3. Se o corpo for muito pequeno (menos de 500 bytes), não é um WSDL válido
         if (body.length < 500) {
             console.log(`❌ FALHA PR: Resposta muito curta (${body.length}b)`);
             return 'offline';
@@ -65,10 +59,8 @@ async function checkRealEndpoint(url: string): Promise<'online' | 'offline' | 'i
         return latency > 1000 ? 'instavel' : 'online';
 
     } catch (error: any) {
-        // AQUI PEGAMOS O SEU ERRO DE SOCKET
         console.log(`❌ ERRO CONEXÃO PR: ${error.message}`);
 
-        // Qualquer erro de rede (Timeout, Socket Hang Up, TLS Error) vira OFFLINE
         return 'offline';
     }
 }
@@ -128,15 +120,14 @@ export async function GET() {
 
             results.push({ ...baseData, modelo: 'NFe' });
 
-            // APLICANDO A LÓGICA DO PR NA NFCe
             const nfceData = { ...baseData, modelo: 'NFCe' };
 
             if (estado === 'PR') {
-                // Se o nosso teste real disse que não está 'online', nós mandamos!
+
                 if (prStatus !== 'online') {
                     nfceData.autorizacao = prStatus;
                     nfceData.status_servico = prStatus;
-                    // Se estiver offline, derruba tudo
+
                     if (prStatus === 'offline') {
                         nfceData.retorno_autorizacao = 'offline';
                         nfceData.consulta = 'offline';
