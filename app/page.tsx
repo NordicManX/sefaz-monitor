@@ -224,7 +224,7 @@ export default function Home() {
         </div>
       </header>
 
-      {/* ALERTA DE DADOS DESATUALIZADOS (SÓ APARECE SE NÃO ESTIVER OFFLINE) */}
+      {/* ALERTA DE DADOS DESATUALIZADOS */}
       {isStale && currentData?.autorizacao !== 'offline' && (
         <div className="w-full max-w-5xl mb-6 bg-amber-500/10 border border-amber-500/30 p-4 rounded-xl flex items-center gap-3 text-amber-200 animate-pulse">
           <AlertTriangle className="w-6 h-6 text-amber-500" />
