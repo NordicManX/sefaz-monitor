@@ -1,9 +1,10 @@
 'use client';
 
 import { supabase } from '@/lib/supabase';
-import { useState, useEffect, useMemo, useRef } from 'react';
-import { ChevronDown, Wifi, AlertTriangle, Zap, CheckCircle2, XCircle, FileText, ShoppingCart, Eye, Clock, XOctagon, Terminal } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { ChevronDown, Wifi, AlertTriangle, CheckCircle2, XOctagon, FileText, ShoppingCart, Eye, Clock, Terminal } from 'lucide-react';
 
+// Tipagem alinhada com o retorno do Backend
 type StateStatus = {
   estado: string;
   modelo: 'NFe' | 'NFCe';
@@ -13,7 +14,8 @@ type StateStatus = {
   consulta: string;
   status_servico: string;
   created_at?: string;
-  details?: string; // Nova coluna de detalhes do erro
+  details?: string; // Mensagem de erro vinda do backend
+  latency?: number; // Latência vinda do backend
 };
 
 type HistoryPoint = {
@@ -29,7 +31,7 @@ const ESTADOS = [
 
 export default function Home() {
   const [selectedUF, setSelectedUF] = useState('PR');
-  const [selectedModel, setSelectedModel] = useState<'NFe' | 'NFCe'>('NFe');
+  const [selectedModel, setSelectedModel] = useState<'NFe' | 'NFCe'>('NFCe'); // Padrão NFCe (Varejo)
 
   const [currentData, setCurrentData] = useState<StateStatus | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
@@ -38,96 +40,129 @@ export default function Home() {
   const [lastCheck, setLastCheck] = useState<Date>(new Date());
 
   const [isStale, setIsStale] = useState(false);
-  const [minutesAgo, setMinutesAgo] = useState(0);
 
-  // Stats para visita
+  // Stats de visita (Opcional)
   useEffect(() => {
-    fetch('/api/visit', { cache: 'no-store' })
-      .then(res => res.json())
-      .then(json => json.count && setVisitCount(json.count))
-      .catch(console.error);
+    // Se não tiver rota de visit, pode comentar
+    // fetch('/api/visit').then(r => r.json()).then(d => setVisitCount(d.count)).catch(() => {});
   }, []);
 
-  // Check Stale
+  // Verifica se os dados estão "velhos" (Stale) > 5 min
   useEffect(() => {
     if (!currentData?.created_at) return;
     const checkStale = () => {
       const lastDate = new Date(currentData.created_at!);
-      const now = new Date();
-      const diffMs = now.getTime() - lastDate.getTime();
-      const diffMins = Math.floor(diffMs / 60000);
-      setMinutesAgo(diffMins);
+      const diffMins = Math.floor((new Date().getTime() - lastDate.getTime()) / 60000);
       setIsStale(diffMins >= 5 && currentData.autorizacao !== 'offline');
     };
     checkStale();
-    const timer = setInterval(checkStale, 5000);
+    const timer = setInterval(checkStale, 10000);
     return () => clearInterval(timer);
   }, [currentData]);
 
-  const updateRemoteStatus = async () => {
+  // Função Principal: Chama o Backend e Atualiza a Tela
+  const runLiveCheck = async () => {
     try {
       setLastCheck(new Date());
-      await fetch(`/api/status?t=${Date.now()}`, {
+      // Chama sua rota API (Backend Next.js)
+      const res = await fetch(`/api/status?t=${Date.now()}`, {
         cache: 'no-store',
         headers: { 'Cache-Control': 'no-cache' }
       });
+
+      if (!res.ok) throw new Error('Falha no fetch');
+
+      const data: StateStatus[] = await res.json();
+
+      // Filtra o Estado e Modelo que o usuário está vendo agora
+      const myStatus = data.find(d => d.estado === selectedUF && d.modelo === selectedModel);
+
+      if (myStatus) {
+        handleNewData(myStatus);
+      }
     } catch (err) {
-      console.error("Erro update:", err);
+      console.error("Erro no check:", err);
     }
   };
 
-  const fetchHistory = async (uf: string, modelo: string) => {
+  // Centraliza a atualização de estado para usar tanto no Fetch quanto no Realtime
+  const handleNewData = (newData: StateStatus) => {
+    // Adiciona timestamp se não vier do banco
+    if (!newData.created_at) newData.created_at = new Date().toISOString();
+
+    setCurrentData(newData);
+    setIsStale(false);
+
+    setHistory((prev) => {
+      // Evita duplicatas se o realtime e o fetch chegarem juntos (checagem simples por minuto/segundo)
+      const last = prev[0];
+      const newTime = new Date(newData.created_at!).getTime();
+      const lastTime = last ? new Date(last.status.created_at!).getTime() : 0;
+
+      // Se a diferença for menor que 2 segundos, ignora (já atualizou)
+      if (Math.abs(newTime - lastTime) < 2000) return prev;
+
+      const newPoint: HistoryPoint = {
+        time: new Date(newData.created_at!).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        fullDate: new Date(newData.created_at!).toLocaleString('pt-BR'),
+        status: newData
+      };
+      // Mantém apenas os últimos 60 pontos
+      return [newPoint, ...prev].slice(0, 60);
+    });
+    setLoading(false);
+  };
+
+  // 1. Carregar Histórico Inicial (Do Banco)
+  const loadInitialHistory = async () => {
     setLoading(true);
+    setHistory([]);
     try {
-      const res = await fetch(`/api/history?uf=${uf}&modelo=${modelo}&t=${Date.now()}`, { cache: 'no-store' });
-      const json = await res.json();
+      // Supabase direto aqui para pegar histórico rápido
+      const { data } = await supabase
+        .from('sefaz_logs')
+        .select('*')
+        .eq('estado', selectedUF)
+        .eq('modelo', selectedModel)
+        .order('created_at', { ascending: false })
+        .limit(60);
 
-      if (Array.isArray(json) && json.length > 0) {
-        const latest = json[0];
-        setCurrentData(latest);
-
-        const formattedHistory = json.map((item: any) => ({
+      if (data && data.length > 0) {
+        const formatted = data.map((item: any) => ({
           time: new Date(item.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
           fullDate: new Date(item.created_at).toLocaleString('pt-BR'),
           status: item
         }));
-
-        setHistory(formattedHistory);
+        setHistory(formatted);
+        setCurrentData(data[0]);
+        setLoading(false);
       } else {
-        updateRemoteStatus();
+        // Se não tem histórico, roda um check agora
+        runLiveCheck();
       }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
+    } catch (e) {
+      console.error(e);
+      runLiveCheck();
     }
   };
 
   useEffect(() => {
-    setHistory([]);
-    fetchHistory(selectedUF, selectedModel);
-    const interval = setInterval(() => { updateRemoteStatus(); }, 15000);
+    loadInitialHistory();
 
+    // 2. Polling (Intervalo de 15 segundos)
+    const interval = setInterval(() => { runLiveCheck(); }, 15000);
+
+    // 3. Realtime (Para ver se outro usuário atualizou)
     const channel = supabase
-      .channel('sefaz-realtime-model')
+      .channel('sefaz-realtime')
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'sefaz_logs', filter: `estado=eq.${selectedUF}` },
         (payload) => {
           const newLog = payload.new as StateStatus;
           if (newLog.modelo === selectedModel) {
-            console.log("⚡ Realtime:", newLog.autorizacao);
-            setCurrentData(newLog);
-            setIsStale(false);
-            setMinutesAgo(0);
-            setHistory((prev) => {
-              const newPoint = {
-                time: new Date(newLog.created_at || Date.now()).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-                fullDate: new Date(newLog.created_at || Date.now()).toLocaleString('pt-BR'),
-                status: newLog
-              };
-              return [newPoint, ...prev].slice(0, 60);
-            });
+            console.log("⚡ Realtime Update recebido");
+            handleNewData(newLog);
           }
         }
       )
@@ -139,25 +174,32 @@ export default function Home() {
     };
   }, [selectedUF, selectedModel]);
 
+  // UI Helpers
   const headerStatus = useMemo(() => {
     if (!currentData) return { color: 'text-slate-500', icon: <Wifi className="w-3 h-3" />, text: 'Carregando...' };
+
     if (currentData.autorizacao === 'offline' || currentData.status_servico === 'offline') {
       return { color: 'text-rose-500 font-bold', icon: <XOctagon className="w-3 h-3" />, text: 'SEFAZ INDISPONÍVEL' };
     }
     if (isStale || currentData.autorizacao === 'instavel') {
-      return { color: 'text-orange-500 font-bold', icon: <AlertTriangle className="w-3 h-3" />, text: 'Lentidão / Instável' };
+      return { color: 'text-orange-500 font-bold', icon: <AlertTriangle className="w-3 h-3" />, text: 'Instabilidade / Lento' };
     }
     return { color: 'text-emerald-500 font-bold', icon: <Wifi className="w-3 h-3" />, text: 'Sistema Online' };
   }, [currentData, isStale]);
 
-  // FILTRO DE LOGS DE ERRO
+  // Filtro de Logs de Erro
   const errorLogs = useMemo(() => {
-    return history.filter(h => h.status.autorizacao === 'offline' || h.status.autorizacao === 'instavel');
+    return history.filter(h =>
+      h.status.autorizacao === 'offline' ||
+      h.status.autorizacao === 'instavel' ||
+      h.status.status_servico === 'offline'
+    );
   }, [history]);
 
   return (
     <main className="min-h-screen bg-[#0B0F19] text-slate-300 font-sans p-4 md:p-8 flex flex-col items-center">
 
+      {/* --- HEADER --- */}
       <header className="w-full max-w-5xl flex flex-col md:flex-row justify-between items-center mb-6 gap-6 border-b border-slate-800/60 pb-6">
         <div>
           <h1 className="text-3xl font-bold text-white tracking-tight flex items-center gap-2">
@@ -174,13 +216,14 @@ export default function Home() {
                 <span className={`relative inline-flex rounded-full h-2 w-2 ${loading ? 'bg-indigo-500' : 'bg-emerald-500'}`}></span>
               </span>
               <span className="text-[10px] text-slate-600 font-mono">
-                {loading ? 'Atualizando...' : 'Live'}
+                {loading ? 'Atualizando...' : 'Live Monitoring'}
               </span>
             </div>
           </div>
         </div>
 
         <div className="flex gap-4">
+          {/* Botões NFe / NFCe */}
           <div className="flex bg-[#111625] p-1 rounded-lg border border-slate-700">
             <button
               onClick={() => setSelectedModel('NFe')}
@@ -196,6 +239,7 @@ export default function Home() {
             </button>
           </div>
 
+          {/* Select Estado */}
           <div className="relative group w-32">
             <div className="absolute right-3 top-3 pointer-events-none text-slate-500">
               <ChevronDown className="w-4 h-4" />
@@ -211,31 +255,29 @@ export default function Home() {
         </div>
       </header>
 
+      {/* --- ALERTA DE ERRO CRÍTICO --- */}
       {currentData?.autorizacao === 'offline' && (
         <div className="w-full max-w-5xl mb-6 bg-rose-500/10 border border-rose-500/30 p-4 rounded-xl flex items-center gap-3 text-rose-200 animate-pulse shadow-[0_0_20px_-5px_rgba(244,63,94,0.2)]">
           <XOctagon className="w-6 h-6 text-rose-500" />
           <div>
             <p className="font-bold text-sm">CRÍTICO: SERVIÇO INDISPONÍVEL</p>
-            <p className="text-xs opacity-80">A SEFAZ {selectedUF} não está respondendo ou está indisponível no momento.</p>
+            <p className="text-xs opacity-80">
+              A SEFAZ {selectedUF} não está respondendo.
+              {currentData.details && ` Detalhe: ${currentData.details}`}
+            </p>
           </div>
         </div>
       )}
 
-      {(isStale || currentData?.autorizacao === 'instavel') && currentData?.autorizacao !== 'offline' && (
-        <div className="w-full max-w-5xl mb-6 bg-orange-500/10 border border-orange-500/30 p-4 rounded-xl flex items-center gap-3 text-orange-200 animate-pulse">
-          <AlertTriangle className="w-6 h-6 text-orange-500" />
-          <div>
-            <p className="font-bold text-sm">Instabilidade ou Lentidão Detectada</p>
-            <p className="text-xs opacity-80">O tempo de resposta está alto ou os dados estão demorando para atualizar.</p>
-          </div>
-        </div>
-      )}
-
+      {/* --- DASHBOARD PRINCIPAL --- */}
       <div className="w-full max-w-5xl space-y-8 flex-1">
         {loading && !currentData ? (
-          <div className="h-64 rounded-2xl bg-slate-800/30 animate-pulse border border-slate-700/30"></div>
+          <div className="h-64 rounded-2xl bg-slate-800/30 animate-pulse border border-slate-700/30 flex items-center justify-center text-slate-600">
+            Carregando dados da SEFAZ...
+          </div>
         ) : currentData && (
           <>
+            {/* Badges de Status Atual */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
               <StatusBadge label="Autorização" status={currentData.autorizacao} isStale={isStale} />
               <StatusBadge label="Retorno" status={currentData.retorno_autorizacao} isStale={isStale} />
@@ -244,6 +286,7 @@ export default function Home() {
               <StatusBadge label="Serviço" status={currentData.status_servico} isStale={isStale} />
             </div>
 
+            {/* Gráficos de Barras (Uptime) */}
             <div className="space-y-6">
               <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-4">
                 <h3 className="text-slate-400 font-bold text-sm uppercase tracking-wider flex items-center gap-2">
@@ -261,7 +304,7 @@ export default function Home() {
         )}
       </div>
 
-      {/* --- LOGS DE ERRO (IGUAL AO VIZINHO) --- */}
+      {/* --- LOG DE INCIDENTES --- */}
       <div className="w-full max-w-5xl mt-10">
         <div className="flex items-center gap-2 mb-3 text-slate-400 border-b border-slate-800 pb-2">
           <Terminal className="w-4 h-4" />
@@ -295,12 +338,12 @@ export default function Home() {
                     </td>
                     <td className="p-3 text-slate-300 break-all">
                       {log.status.details ? (
-                        <span>{log.status.details}</span>
+                        <span className="text-rose-300">{log.status.details}</span>
                       ) : (
                         <span className="opacity-50 italic">
                           {log.status.autorizacao === 'offline'
-                            ? "Client network socket disconnected - Timeout na conexão"
-                            : "Tempo de resposta elevado detectado"}
+                            ? "Timeout / Bloqueio na conexão com a SEFAZ"
+                            : "Latência elevada detectada"}
                         </span>
                       )}
                     </td>
@@ -312,25 +355,21 @@ export default function Home() {
         </div>
       </div>
 
-      <div className="fixed bottom-4 right-4 text-[10px] text-slate-600 font-mono bg-slate-900 px-3 py-1.5 rounded border border-slate-800 flex items-center gap-2">
+      <div className="fixed bottom-4 right-4 text-[10px] text-slate-600 font-mono bg-slate-900 px-3 py-1.5 rounded border border-slate-800 flex items-center gap-2 z-50">
         <Clock className="w-3 h-3" />
-        Último Sync: {lastCheck.toLocaleTimeString()}
+        Último Check: {lastCheck.toLocaleTimeString()}
       </div>
 
       <footer className="w-full max-w-5xl mt-12 pt-8 pb-4 border-t border-slate-800/50 flex flex-col items-center gap-3">
         <div className="text-xs text-slate-500 font-mono tracking-widest uppercase">
-          Desenvolvido por <span className="text-indigo-400 font-bold">Nordic-Tech COM MUITO CAFÉ ☕!!</span>
-        </div>
-        <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900/50 border border-slate-800 text-[10px] text-slate-600 font-mono">
-          <Eye className="w-3 h-3 text-slate-500" />
-          <span>Acessos: <span className="text-slate-300 font-bold">{visitCount}</span></span>
+          Desenvolvido por <span className="text-indigo-400 font-bold">Nordic-Tech</span>
         </div>
       </footer>
     </main>
   );
 }
 
-// --- Componentes Visuais ---
+// --- Componentes Visuais (Mantive iguais, só ajustei cores) ---
 function StatusBadge({ label, status, isStale }: { label: string, status: string, isStale: boolean }) {
   if (status === 'offline') {
     return (
@@ -358,10 +397,12 @@ function StatusBadge({ label, status, isStale }: { label: string, status: string
 
 function UptimeRow({ label, history, field }: { label: string, history: HistoryPoint[], field: keyof StateStatus }) {
   const TOTAL_BARS = 60;
+  // Conta uptime baseado no histórico carregado
   const onlineCount = history.filter(h => h.status[field] === 'online').length;
   const total = history.length;
-  const uptimePercentage = total > 0 ? ((onlineCount / total) * 100).toFixed(1) : '0.0';
+  const uptimePercentage = total > 0 ? ((onlineCount / total) * 100).toFixed(1) : '100.0';
 
+  // Inverte para mostrar o mais recente na direita
   const displayHistory = [...history].reverse();
   const paddedHistory = [...Array(Math.max(0, TOTAL_BARS - displayHistory.length)).fill(null), ...displayHistory].slice(-TOTAL_BARS);
 
@@ -371,22 +412,26 @@ function UptimeRow({ label, history, field }: { label: string, history: HistoryP
         <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
           {label}
         </h3>
-        <span className={`text-xs font-mono font-bold ${Number(uptimePercentage) > 95 ? 'text-emerald-400' : Number(uptimePercentage) > 70 ? 'text-orange-400' : 'text-rose-400'}`}>
-          {total > 0 ? `${uptimePercentage}% Uptime` : '...'}
+        <span className={`text-xs font-mono font-bold ${Number(uptimePercentage) > 95 ? 'text-emerald-400' : Number(uptimePercentage) > 80 ? 'text-orange-400' : 'text-rose-400'}`}>
+          {total > 0 ? `${uptimePercentage}% Online` : '...'}
         </span>
       </div>
-      <div className="flex h-8 gap-[3px] w-full">
+      <div className="flex h-8 gap-[3px] w-full bg-slate-800/20 rounded p-1">
         {paddedHistory.map((point, i) => {
-          if (!point) return <div key={`empty-${i}`} className="flex-1 bg-slate-800/40 rounded-[2px]" />;
+          if (!point) return <div key={`empty-${i}`} className="flex-1 bg-slate-800/40 rounded-[1px]" />;
+
           const status = point.status[field];
           let colorClass = 'bg-emerald-500 shadow-[0_0_8px_-2px_rgba(16,185,129,0.5)]';
+
           if (status === 'instavel') colorClass = 'bg-orange-500 shadow-[0_0_8px_-2px_rgba(249,115,22,0.5)]';
           if (status === 'offline') colorClass = 'bg-rose-600 shadow-[0_0_8px_-2px_rgba(244,63,94,0.8)]';
+          if (status === 'unknown') colorClass = 'bg-slate-600';
 
           return (
-            <div key={i} className="relative flex-1 group/bar">
-              <div className={`h-full w-full rounded-[2px] transition-all duration-300 hover:scale-y-110 ${colorClass}`}></div>
-              <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 opacity-0 group-hover/bar:opacity-100 transition-opacity z-20 pointer-events-none">
+            <div key={i} className="relative flex-1 group/bar h-full">
+              <div className={`h-full w-full rounded-[1px] transition-all duration-300 hover:brightness-125 ${colorClass}`}></div>
+              {/* Tooltip */}
+              <div className="absolute bottom-full mb-2 right-0 opacity-0 group-hover/bar:opacity-100 transition-opacity z-20 pointer-events-none">
                 <div className="bg-slate-900 text-slate-200 text-[10px] px-2 py-1 rounded border border-slate-700 whitespace-nowrap shadow-xl">
                   <div className="font-bold mb-0.5 uppercase">{status}</div>
                   <div className="text-slate-500 font-mono">{point.time}</div>
