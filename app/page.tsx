@@ -216,7 +216,7 @@ export default function Home() {
           <XOctagon className="w-6 h-6 text-rose-500" />
           <div>
             <p className="font-bold text-sm">CRÍTICO: SERVIÇO INDISPONÍVEL</p>
-            <p className="text-xs opacity-80">A SEFAZ {selectedUF} não está respondendo e está indisponível no momento.</p>
+            <p className="text-xs opacity-80">A SEFAZ {selectedUF} não está respondendo ou está indisponível no momento.</p>
           </div>
         </div>
       )}
